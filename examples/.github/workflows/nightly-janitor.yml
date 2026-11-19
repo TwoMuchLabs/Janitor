@@ -37,7 +37,7 @@ jobs:
       # Install exactly what your CI installs, so the janitor's verification matches it.
       - run: npm ci
 
-      - uses: TwoMuchLabs/Janitor@v0
+      - uses: TwoMuchLabs/Janitor@main   # pin to a release tag once one is published
         # with:
         #   categories: dead-files,unused-exports,stale-flags,outdated-deps
         #   verify: |

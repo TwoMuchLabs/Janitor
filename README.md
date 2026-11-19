@@ -53,7 +53,7 @@ Dead code removed: 403 B, 18 line(s).
              node-version: 22
              cache: npm
          - run: npm ci
-         - uses: TwoMuchLabs/Janitor@v0
+         - uses: TwoMuchLabs/Janitor@main   # pin to a release tag once one is published
    ```
 
 2. In **Settings -> Actions -> General -> Workflow permissions**, enable
