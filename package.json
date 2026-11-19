@@ -44,5 +44,10 @@
     }
   },
   "types": "./dist/index.d.ts",
-  "main": "./dist/index.js"
+  "main": "./dist/index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TwoMuchLabs/Janitor.git"
+  },
+  "homepage": "https://github.com/TwoMuchLabs/Janitor#readme"
 }

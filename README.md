@@ -53,7 +53,7 @@ Dead code removed: 403 B, 18 line(s).
              node-version: 22
              cache: npm
          - run: npm ci
-         - uses: TwoMuchLabs/repo-janitor@v0
+         - uses: TwoMuchLabs/Janitor@v0
    ```
 
 2. In **Settings -> Actions -> General -> Workflow permissions**, enable
@@ -67,7 +67,7 @@ Dead code removed: 403 B, 18 line(s).
 ### From the command line
 
 ```bash
-git clone https://github.com/TwoMuchLabs/repo-janitor && cd repo-janitor
+git clone https://github.com/TwoMuchLabs/Janitor && cd Janitor
 npm ci && npm run build && npm link
 
 cd /path/to/your/project
