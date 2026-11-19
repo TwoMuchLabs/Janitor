@@ -1,0 +1,147 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { exec } from '../exec.js';
+import type { Category, CleanupItem } from '../types.js';
+
+export interface SemVer {
+  major: number;
+  minor: number;
+  patch: number;
+  prerelease: boolean;
+}
+
+export function parseSemVer(version: string): SemVer | null {
+  const m = /^v?(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.exec(version.trim());
+  if (!m) return null;
+  return { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]), prerelease: Boolean(m[4]) };
+}
+
+export type UpdateKind = 'patch' | 'minor' | 'major' | 'none';
+
+/**
+ * Classify an update by what semver promises. For 0.x versions a minor bump
+ * may be breaking by convention, so it is classified as major.
+ */
+export function classifyUpdate(from: string, to: string): UpdateKind {
+  const a = parseSemVer(from);
+  const b = parseSemVer(to);
+  if (!a || !b || a.prerelease || b.prerelease) return 'none';
+  if (b.major !== a.major) return b.major > a.major ? 'major' : 'none';
+  if (b.minor !== a.minor) {
+    if (b.minor < a.minor) return 'none';
+    return a.major === 0 ? 'major' : 'minor';
+  }
+  if (b.patch > a.patch) return 'patch';
+  return 'none';
+}
+
+export interface OutdatedEntry {
+  name: string;
+  current: string;
+  /** Highest version the range in package.json allows. */
+  wanted: string;
+  latest: string;
+}
+
+export interface PlannedUpdate {
+  name: string;
+  from: string;
+  to: string;
+  kind: 'patch' | 'minor';
+}
+
+/** Parse `npm outdated --json` (an object keyed by package name; values may be arrays in workspaces). */
+export function parseNpmOutdated(stdout: string): OutdatedEntry[] {
+  let json: unknown;
+  try {
+    json = JSON.parse(stdout || '{}');
+  } catch {
+    return [];
+  }
+  if (typeof json !== 'object' || json === null) return [];
+  const entries: OutdatedEntry[] = [];
+  for (const [name, value] of Object.entries(json)) {
+    const info = (Array.isArray(value) ? value[0] : value) as Record<string, unknown> | undefined;
+    if (!info || typeof info.current !== 'string' || typeof info.wanted !== 'string') continue;
+    entries.push({ name, current: info.current, wanted: info.wanted, latest: String(info.latest ?? info.wanted) });
+  }
+  return entries;
+}
+
+/**
+ * Keep only minor/patch updates that the declared range already permits, and
+ * describe everything else as a note for a human.
+ */
+export function planUpdates(
+  entries: OutdatedEntry[],
+  exclude: string[],
+  max: number,
+): { updates: PlannedUpdate[]; notes: string[] } {
+  const updates: PlannedUpdate[] = [];
+  const majors: string[] = [];
+  for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (exclude.includes(e.name)) continue;
+    const kind = classifyUpdate(e.current, e.wanted);
+    if (kind === 'patch' || kind === 'minor') updates.push({ name: e.name, from: e.current, to: e.wanted, kind });
+    if (classifyUpdate(e.wanted, e.latest) !== 'none') majors.push(`\`${e.name}\` ${e.wanted} -> ${e.latest}`);
+  }
+  const notes: string[] = [];
+  if (updates.length > max) {
+    notes.push(`${updates.length - max} more minor/patch update(s) were deferred to a later night (limit ${max} per run).`);
+  }
+  if (majors.length) {
+    notes.push(`Updates beyond the declared range (not applied, review by hand): ${majors.join(', ')}.`);
+  }
+  return { updates: updates.slice(0, max), notes };
+}
+
+const NPM_FLAGS = ['--no-audit', '--no-fund', '--loglevel=error'];
+const NPM_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * Minor and patch dependency updates, one package per item so a single bad
+ * release cannot block the others. Only the lockfile changes: versions stay
+ * inside the ranges package.json already declares.
+ */
+export const outdatedDeps: Category = {
+  name: 'outdated-deps',
+  title: 'Update minor/patch dependencies',
+  countsAsDeadCode: false,
+
+  async scan(ctx) {
+    if (!fs.existsSync(path.join(ctx.root, 'package.json'))) return { items: [], notes: [] };
+    if (!fs.existsSync(path.join(ctx.root, 'package-lock.json'))) {
+      let hasDeps = false;
+      try {
+        const pkg = JSON.parse(fs.readFileSync(path.join(ctx.root, 'package.json'), 'utf8')) as Record<string, object>;
+        hasDeps = Object.keys({ ...pkg.dependencies, ...pkg.devDependencies }).length > 0;
+      } catch {
+        /* unreadable package.json: nothing to update */
+      }
+      if (!hasDeps) return { items: [], notes: [] };
+      return {
+        items: [],
+        notes: ['Dependency updates currently support npm with a committed `package-lock.json`; skipped.'],
+      };
+    }
+    // `npm outdated` exits 1 when anything is outdated; only the JSON matters.
+    const res = await exec('npm', ['outdated', '--json', ...NPM_FLAGS], { cwd: ctx.root, timeoutMs: NPM_TIMEOUT_MS });
+    const { updates, notes } = planUpdates(parseNpmOutdated(res.stdout), ctx.config.deps.exclude, ctx.config.deps.max);
+
+    const items: CleanupItem[] = updates.map((u) => ({
+      id: `dep:${u.name}@${u.to}`,
+      description: `update \`${u.name}\` ${u.from} -> ${u.to} (${u.kind})`,
+      async apply(c) {
+        const r = await exec('npm', ['update', u.name, ...NPM_FLAGS], { cwd: c.root, timeoutMs: NPM_TIMEOUT_MS });
+        if (r.code !== 0) throw new Error(`npm update ${u.name} failed: ${r.stderr.trim() || r.stdout.trim()}`);
+      },
+    }));
+    return { items, notes };
+  },
+
+  /** git restored package-lock.json; bring node_modules back in line with it. */
+  async afterRevert(ctx) {
+    if (!fs.existsSync(path.join(ctx.root, 'node_modules'))) return;
+    await exec('npm', ['install', '--prefer-offline', ...NPM_FLAGS], { cwd: ctx.root, timeoutMs: NPM_TIMEOUT_MS });
+  },
+};

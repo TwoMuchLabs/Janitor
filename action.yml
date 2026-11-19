@@ -1,0 +1,113 @@
+name: repo-janitor
+description: Nightly, test-verified repository cleanup. Removes dead code one step at a time, reverts anything that breaks, and opens a PR with exact rollback commands.
+author: Two Much Labs
+branding:
+  icon: trash-2
+  color: gray-dark
+
+inputs:
+  categories:
+    description: Comma-separated categories to run (dead-files, unused-exports, stale-flags, outdated-deps). Defaults to .repo-janitor.json, then all.
+    required: false
+    default: ''
+  verify:
+    description: Verification commands, one per line. Defaults to the project's detected typecheck, build and test scripts.
+    required: false
+    default: ''
+  working-directory:
+    description: Repository (or package) to clean, relative to the workspace.
+    required: false
+    default: '.'
+  open-pr:
+    description: Push the branch and open (or update) a pull request when anything was cleaned up.
+    required: false
+    default: 'true'
+  base:
+    description: Branch the pull request targets. Defaults to the branch the workflow runs on.
+    required: false
+    default: ''
+  labels:
+    description: Comma-separated labels for the pull request. Labels must already exist.
+    required: false
+    default: ''
+  token:
+    description: Token used to push and open the pull request. Use a PAT or GitHub App token if the PR itself must trigger CI.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  changed:
+    description: "'true' when at least one cleanup survived verification."
+    value: ${{ steps.run.outputs.changed }}
+  branch:
+    description: The nightly-janitor/YYYY-MM-DD branch name.
+    value: ${{ steps.run.outputs.branch }}
+  pr-body-file:
+    description: Path of the generated PR description.
+    value: ${{ steps.run.outputs.pr-body-file }}
+  report-file:
+    description: Path of the machine-readable JSON report.
+    value: ${{ steps.run.outputs.report-file }}
+  pr-url:
+    description: URL of the pull request, when one was opened or updated.
+    value: ${{ steps.pr.outputs.url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Build repo-janitor
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: |
+        if [ ! -f dist/cli.js ]; then
+          npm ci --no-audit --no-fund --loglevel=error
+          npm run build
+        fi
+
+    - name: Run repo-janitor
+      id: run
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        JANITOR_CATEGORIES: ${{ inputs.categories }}
+        JANITOR_VERIFY: ${{ inputs.verify }}
+      run: |
+        args=(run)
+        if [ -n "$JANITOR_CATEGORIES" ]; then args+=(--categories "$JANITOR_CATEGORIES"); fi
+        while IFS= read -r line; do
+          if [ -n "${line// /}" ]; then args+=(--verify "$line"); fi
+        done <<< "$JANITOR_VERIFY"
+        node "$GITHUB_ACTION_PATH/dist/cli.js" "${args[@]}"
+
+    - name: Job summary
+      if: steps.run.outputs.pr-body-file != ''
+      shell: bash
+      env:
+        PR_BODY_FILE: ${{ steps.run.outputs.pr-body-file }}
+      run: cat "$PR_BODY_FILE" >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Push branch and open pull request
+      id: pr
+      if: inputs.open-pr == 'true' && steps.run.outputs.changed == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        BRANCH: ${{ steps.run.outputs.branch }}
+        TITLE: ${{ steps.run.outputs.pr-title }}
+        BODY_FILE: ${{ steps.run.outputs.pr-body-file }}
+        BASE: ${{ inputs.base || github.ref_name }}
+        LABELS: ${{ inputs.labels }}
+      run: |
+        git push --force-with-lease origin "$BRANCH"
+        existing="$(gh pr list --head "$BRANCH" --state open --json url --jq '.[0].url // empty')"
+        if [ -n "$existing" ]; then
+          gh pr edit "$existing" --title "$TITLE" --body-file "$BODY_FILE"
+          url="$existing"
+        else
+          args=(--base "$BASE" --head "$BRANCH" --title "$TITLE" --body-file "$BODY_FILE")
+          if [ -n "$LABELS" ]; then args+=(--label "$LABELS"); fi
+          url="$(gh pr create "${args[@]}")"
+        fi
+        echo "url=$url" >> "$GITHUB_OUTPUT"
+        echo "Pull request: $url"

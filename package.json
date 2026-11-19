@@ -1,0 +1,48 @@
+{
+  "name": "repo-janitor",
+  "version": "0.1.0",
+  "description": "Autonomous overnight repository cleanup: removes dead code one safe step at a time, verifies every step with your own tests, and reverts anything that breaks.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "repo-janitor": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "action.yml",
+    "examples"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "dead-code",
+    "cleanup",
+    "unused-exports",
+    "feature-flags",
+    "dependencies",
+    "github-action",
+    "cli"
+  ],
+  "dependencies": {
+    "typescript": "^5.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "main": "./dist/index.js"
+}

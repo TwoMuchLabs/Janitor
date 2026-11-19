@@ -1,0 +1,48 @@
+# Copy this file to .github/workflows/nightly-janitor.yml in your repository.
+#
+# One-time setup: Settings -> Actions -> General -> Workflow permissions ->
+# enable "Allow GitHub Actions to create and approve pull requests".
+name: Nightly janitor
+
+on:
+  schedule:
+    # 18:23 UTC every day (02:23 in Singapore). Pick a quiet hour for your team;
+    # an off-the-hour minute avoids GitHub's scheduling rush at :00.
+    - cron: '23 18 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: nightly-janitor
+  cancel-in-progress: false
+
+jobs:
+  janitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Full history lets the stale-flag check see how long a flag has been untouched.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      # Install exactly what your CI installs, so the janitor's verification matches it.
+      - run: npm ci
+
+      - uses: TwoMuchLabs/repo-janitor@v0
+        # with:
+        #   categories: dead-files,unused-exports,stale-flags,outdated-deps
+        #   verify: |
+        #     npm run typecheck
+        #     npm run build
+        #     npm test
+        #   labels: janitor
+        #   token: ${{ secrets.JANITOR_TOKEN }}   # PAT or App token, if the PR must trigger your CI
