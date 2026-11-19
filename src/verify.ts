@@ -11,15 +11,15 @@ export interface CommandResult {
   outputTail: string;
 }
 
-export interface VerifyResult {
+interface VerifyResult {
   ok: boolean;
   results: CommandResult[];
   failed?: CommandResult;
 }
 
-export type PackageManager = 'npm' | 'pnpm' | 'yarn' | 'bun';
+type PackageManager = 'npm' | 'pnpm' | 'yarn' | 'bun';
 
-export function detectPackageManager(root: string): PackageManager {
+function detectPackageManager(root: string): PackageManager {
   if (fs.existsSync(path.join(root, 'pnpm-lock.yaml'))) return 'pnpm';
   if (fs.existsSync(path.join(root, 'yarn.lock'))) return 'yarn';
   if (fs.existsSync(path.join(root, 'bun.lockb')) || fs.existsSync(path.join(root, 'bun.lock'))) return 'bun';

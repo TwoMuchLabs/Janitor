@@ -18,7 +18,7 @@ const REGISTRY_CANDIDATES = [
 ];
 const WRAPPER_KEYS = ['flags', 'features', 'featureFlags', 'feature_flags'];
 
-export interface Registry {
+interface Registry {
   /** Key under which the flag map lives, or null when it is the top-level object. */
   wrapper: string | null;
   flags: Record<string, unknown>;

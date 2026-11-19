@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 
-export interface ExecOptions {
+interface ExecOptions {
   cwd: string;
   env?: NodeJS.ProcessEnv;
   /** Kill the whole process group after this many milliseconds. */

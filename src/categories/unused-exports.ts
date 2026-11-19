@@ -63,7 +63,7 @@ function countIdentifier(sf: ts.SourceFile, name: string): number {
   return count;
 }
 
-export type RemovalKind = 'deleted' | 'unexported';
+type RemovalKind = 'deleted' | 'unexported';
 
 /**
  * Remove the named export `name` from `text`.

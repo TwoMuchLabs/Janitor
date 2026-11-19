@@ -1,6 +1,6 @@
 import type { RunReport, StepRecord } from './types.js';
 
-export interface CategoryTotals {
+interface CategoryTotals {
   category: string;
   title: string;
   kept: number;
@@ -13,7 +13,7 @@ export interface CategoryTotals {
   commits: string[];
 }
 
-export interface Totals {
+interface Totals {
   categories: CategoryTotals[];
   /** Net bytes removed across everything that was kept. */
   bytesRemoved: number;

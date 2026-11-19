@@ -1,6 +1,6 @@
 import { exec, type ExecResult } from './exec.js';
 
-export class GitError extends Error {
+class GitError extends Error {
   constructor(
     readonly args: string[],
     readonly result: ExecResult,
@@ -10,7 +10,7 @@ export class GitError extends Error {
   }
 }
 
-export interface FileStat {
+interface FileStat {
   path: string;
   linesAdded: number;
   linesDeleted: number;
@@ -26,7 +26,7 @@ export interface DiffStats {
   bytesAfter: number;
 }
 
-export const EMPTY_STATS: DiffStats = { files: [], linesAdded: 0, linesDeleted: 0, bytesBefore: 0, bytesAfter: 0 };
+const EMPTY_STATS: DiffStats = { files: [], linesAdded: 0, linesDeleted: 0, bytesBefore: 0, bytesAfter: 0 };
 
 const ZERO_SHA = /^0+$/;
 

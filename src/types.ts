@@ -42,7 +42,7 @@ export interface Category {
   afterRevert?(ctx: JanitorContext): Promise<void>;
 }
 
-export type StepStatus = 'kept' | 'reverted' | 'noop' | 'skipped' | 'planned';
+type StepStatus = 'kept' | 'reverted' | 'noop' | 'skipped' | 'planned';
 
 export interface StepFailure {
   command: string;

@@ -3,20 +3,20 @@ import path from 'node:path';
 import { exec } from '../exec.js';
 import type { Category, CleanupItem } from '../types.js';
 
-export interface SemVer {
+interface SemVer {
   major: number;
   minor: number;
   patch: number;
   prerelease: boolean;
 }
 
-export function parseSemVer(version: string): SemVer | null {
+function parseSemVer(version: string): SemVer | null {
   const m = /^v?(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.exec(version.trim());
   if (!m) return null;
   return { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]), prerelease: Boolean(m[4]) };
 }
 
-export type UpdateKind = 'patch' | 'minor' | 'major' | 'none';
+type UpdateKind = 'patch' | 'minor' | 'major' | 'none';
 
 /**
  * Classify an update by what semver promises. For 0.x versions a minor bump
@@ -35,7 +35,7 @@ export function classifyUpdate(from: string, to: string): UpdateKind {
   return 'none';
 }
 
-export interface OutdatedEntry {
+interface OutdatedEntry {
   name: string;
   current: string;
   /** Highest version the range in package.json allows. */
@@ -43,7 +43,7 @@ export interface OutdatedEntry {
   latest: string;
 }
 
-export interface PlannedUpdate {
+interface PlannedUpdate {
   name: string;
   from: string;
   to: string;

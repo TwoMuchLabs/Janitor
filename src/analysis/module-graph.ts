@@ -2,9 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import ts from 'typescript';
 
-export type ExportKind = 'function' | 'class' | 'interface' | 'type' | 'enum' | 'variable';
+type ExportKind = 'function' | 'class' | 'interface' | 'type' | 'enum' | 'variable';
 
-export interface ExportDecl {
+interface ExportDecl {
   name: string;
   kind: ExportKind;
 }
@@ -12,7 +12,7 @@ export interface ExportDecl {
 /** Marks "every export of the target is used" (namespace import, re-export, dynamic import, ...). */
 export const ALL = '*';
 
-export interface ModuleNode {
+interface ModuleNode {
   file: string;
   /** Resolved in-repo dependencies: target file -> imported names (may contain ALL). */
   edges: Map<string, Set<string>>;

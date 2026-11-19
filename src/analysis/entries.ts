@@ -7,7 +7,7 @@ import { globToRegExp, makeMatcher } from '../util/glob.js';
  * configuration, scripts and framework routing directories. Deliberately
  * broad; a missed cleanup costs nothing, a wrong deletion costs trust.
  */
-export const CONVENTION_ENTRY_GLOBS = [
+const CONVENTION_ENTRY_GLOBS = [
   // tests
   '**/*.test.*',
   '**/*.spec.*',

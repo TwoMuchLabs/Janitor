@@ -12,7 +12,7 @@ import { buildModuleGraph, reachableFrom, type ModuleGraph } from './module-grap
  * `.vue`/`.svelte` components, ...) and path-like tokens in reachable source
  * (catches bundler aliases the resolver does not know about).
  */
-export interface Mentions {
+interface Mentions {
   /** File names with a source extension, e.g. `worker.js`. */
   basenames: Set<string>;
   /** `<parent dir>/<name without extension>`, e.g. `jobs/worker`. */
@@ -21,7 +21,7 @@ export interface Mentions {
   identifiers: Set<string>;
 }
 
-export interface ProjectAnalysis {
+interface ProjectAnalysis {
   sources: string[];
   graph: ModuleGraph;
   entryPoints: EntryPoints;
