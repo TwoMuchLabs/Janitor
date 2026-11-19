@@ -56,7 +56,7 @@ function commitMessage(cat: Category, items: CleanupItem[], verify: string[]): s
     '',
     ...lines,
     '',
-    `Applied by repo-janitor. ${verified}`,
+    `Applied by janitor. ${verified}`,
     '',
   ].join('\n');
 }

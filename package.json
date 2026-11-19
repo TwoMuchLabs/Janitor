@@ -1,11 +1,11 @@
 {
-  "name": "repo-janitor",
+  "name": "@twomuchlabs/janitor",
   "version": "0.1.0",
   "description": "Autonomous overnight repository cleanup: removes dead code one safe step at a time, verifies every step with your own tests, and reverts anything that breaks.",
   "license": "MIT",
   "type": "module",
   "bin": {
-    "repo-janitor": "dist/cli.js"
+    "janitor": "dist/cli.js"
   },
   "files": [
     "dist",

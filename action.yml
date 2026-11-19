@@ -1,4 +1,4 @@
-name: repo-janitor
+name: janitor
 description: Nightly, test-verified repository cleanup. Removes dead code one step at a time, reverts anything that breaks, and opens a PR with exact rollback commands.
 author: Two Much Labs
 branding:
@@ -7,7 +7,7 @@ branding:
 
 inputs:
   categories:
-    description: Comma-separated categories to run (dead-files, unused-exports, stale-flags, outdated-deps). Defaults to .repo-janitor.json, then all.
+    description: Comma-separated categories to run (dead-files, unused-exports, stale-flags, outdated-deps). Defaults to .janitor.json, then all.
     required: false
     default: ''
   verify:
@@ -55,7 +55,7 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Build repo-janitor
+    - name: Build janitor
       shell: bash
       working-directory: ${{ github.action_path }}
       run: |
@@ -64,7 +64,7 @@ runs:
           npm run build
         fi
 
-    - name: Run repo-janitor
+    - name: Run janitor
       id: run
       shell: bash
       working-directory: ${{ inputs.working-directory }}

@@ -20,7 +20,7 @@ export const deadFiles: Category = {
 
     if (project.entryPoints.roots === 0) {
       notes.push(
-        'No entry points were found (no `main`/`exports`/`bin` in package.json and no `src/index.*`), so reachability cannot be trusted and no files were removed. Add `entry` globs to `.repo-janitor.json`.',
+        'No entry points were found (no `main`/`exports`/`bin` in package.json and no `src/index.*`), so reachability cannot be trusted and no files were removed. Add `entry` globs to `.janitor.json`.',
       );
       return { items: [], notes };
     }

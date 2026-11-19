@@ -11,12 +11,12 @@ import { detectVerifyCommands } from './verify.js';
 
 const VERSION = '0.1.0';
 
-const HELP = `repo-janitor ${VERSION}
+const HELP = `janitor ${VERSION}
 Clean up a repository one verified step at a time.
 
 Usage
-  repo-janitor run  [options]   Create nightly-janitor/YYYY-MM-DD and apply verified cleanups
-  repo-janitor scan [options]   Dry run: list what would be attempted, change nothing
+  janitor run  [options]   Create nightly-janitor/YYYY-MM-DD and apply verified cleanups
+  janitor scan [options]   Dry run: list what would be attempted, change nothing
 
 Options
   --repo <path>            Repository to clean (default: current directory)
@@ -27,20 +27,20 @@ Options
   --no-bisect              Revert a whole category on failure instead of salvaging safe items
   --max-verify-runs <n>    Upper bound on verification runs for the night (default: 25)
   --timeout-sec <n>        Timeout per verification command (default: 1200)
-  --pr-body <file>         Where to write the PR description (default: <git-dir>/repo-janitor/pr-body.md)
+  --pr-body <file>         Where to write the PR description (default: <git-dir>/janitor/pr-body.md)
   --report-json <file>     Where to write the machine-readable report
   --allow-unverified       Run even when no verification command exists (not recommended)
   -h, --help               Show this help
   -v, --version            Show the version
 
-Configuration is read from .repo-janitor.json in the repository root; flags win.
+Configuration is read from .janitor.json in the repository root; flags win.
 
 Exit codes: 0 finished (with or without changes), 2 a precondition failed and nothing
 was touched (dirty tree, failing baseline, existing branch, no verification), 1 error.
 `;
 
 function fail(message: string, code: number, detail?: string): never {
-  process.stderr.write(`repo-janitor: ${message}\n`);
+  process.stderr.write(`janitor: ${message}\n`);
   if (detail) process.stderr.write(`\n${detail}\n`);
   process.exit(code);
 }
@@ -107,7 +107,7 @@ async function main(): Promise<void> {
   }
 
   // Outputs live inside the git directory by default so the working tree stays clean.
-  const outDir = path.join(await new Git(root).gitDir(), 'repo-janitor');
+  const outDir = path.join(await new Git(root).gitDir(), 'janitor');
   const prBodyFile = path.resolve(values['pr-body'] ?? path.join(outDir, 'pr-body.md'));
   const reportFile = path.resolve(values['report-json'] ?? path.join(outDir, 'report.json'));
   const totals = computeTotals(report);

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const CONFIG_FILE = '.repo-janitor.json';
+const CONFIG_FILE = '.janitor.json';
 
 export const ALL_CATEGORIES = ['dead-files', 'unused-exports', 'stale-flags', 'outdated-deps'] as const;
 

@@ -124,8 +124,8 @@ export class Git {
     const name = (await this.raw(['config', 'user.name'])).stdout.trim();
     const email = (await this.raw(['config', 'user.email'])).stdout.trim();
     this.identityArgs = [];
-    if (!name) this.identityArgs.push('-c', 'user.name=repo-janitor[bot]');
-    if (!email) this.identityArgs.push('-c', 'user.email=repo-janitor@users.noreply.github.com');
+    if (!name) this.identityArgs.push('-c', 'user.name=janitor[bot]');
+    if (!email) this.identityArgs.push('-c', 'user.email=janitor@users.noreply.github.com');
     return this.identityArgs;
   }
 

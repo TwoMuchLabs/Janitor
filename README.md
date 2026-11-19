@@ -1,8 +1,8 @@
-# repo-janitor
+# Janitor
 
 **A nightly cleanup crew for your repository that never leaves it broken.**
 
-`repo-janitor` finds dead files, unused exports, stale feature flags and outdated
+Janitor finds dead files, unused exports, stale feature flags and outdated
 minor/patch dependencies, then removes them **one verified step at a time**. After
 every step it runs *your* typecheck, build and tests. Anything that breaks is rolled
 back on the spot. You wake up to a pull request that lists exactly what was removed,
@@ -71,16 +71,16 @@ git clone https://github.com/TwoMuchLabs/Janitor && cd Janitor
 npm ci && npm run build && npm link
 
 cd /path/to/your/project
-repo-janitor scan     # dry run: list candidates, change nothing
-repo-janitor run      # do it: branch, apply, verify, commit or revert
+janitor scan     # dry run: list candidates, change nothing
+janitor run      # do it: branch, apply, verify, commit or revert
 ```
 
 `run` leaves you on `nightly-janitor/YYYY-MM-DD` with one commit per kept step and
-writes the PR description to `.git/repo-janitor/pr-body.md`:
+writes the PR description to `.git/janitor/pr-body.md`:
 
 ```bash
 git push -u origin HEAD
-gh pr create --title "chore(janitor): nightly cleanup" --body-file .git/repo-janitor/pr-body.md
+gh pr create --title "chore(janitor): nightly cleanup" --body-file .git/janitor/pr-body.md
 ```
 
 Requires Node 20+ and git.
@@ -164,7 +164,7 @@ A machine-readable `report.json` is written next to the PR body.
 
 ## Configuration
 
-Everything is optional. Put a `.repo-janitor.json` in the repository root:
+Everything is optional. Put a `.janitor.json` in the repository root:
 
 ```json
 {
@@ -196,8 +196,8 @@ Everything is optional. Put a `.repo-janitor.json` in the repository root:
 ### CLI
 
 ```
-repo-janitor run  [options]   Create nightly-janitor/YYYY-MM-DD and apply verified cleanups
-repo-janitor scan [options]   Dry run: list what would be attempted, change nothing
+janitor run  [options]   Create nightly-janitor/YYYY-MM-DD and apply verified cleanups
+janitor scan [options]   Dry run: list what would be attempted, change nothing
 
   --repo <path>            Repository to clean (default: current directory)
   --categories <list>      Comma-separated subset of the categories
@@ -230,7 +230,7 @@ Outputs: `changed`, `branch`, `pr-url`, `pr-body-file`, `report-file`.
 ## Project layout
 
 ```
-repo-janitor/
+Janitor/
 ├── action.yml                    composite GitHub Action (build, run, push, open PR)
 ├── examples/.github/workflows/
 │   └── nightly-janitor.yml       copy-ready cron workflow
@@ -241,7 +241,7 @@ repo-janitor/
 │   ├── git.ts                    branch, stage, commit, restore, diff statistics
 │   ├── exec.ts                   subprocess runner with timeout and process-group kill
 │   ├── report.ts                 totals, PR description, dry-run plan
-│   ├── config.ts                 .repo-janitor.json loading and validation
+│   ├── config.ts                 .janitor.json loading and validation
 │   ├── types.ts                  Category / CleanupItem / RunReport contracts
 │   ├── analysis/
 │   │   ├── module-graph.ts       import/export graph via the TypeScript compiler API
@@ -264,7 +264,7 @@ and reporting.
 ```ts
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Category } from 'repo-janitor';
+import type { Category } from '@twomuchlabs/janitor';
 
 export const removeTodoFiles: Category = {
   name: 'todo-files',

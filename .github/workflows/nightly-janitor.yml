@@ -1,4 +1,4 @@
-# repo-janitor cleaning itself. The copy-ready version for other repositories is
+# janitor cleaning itself. The copy-ready version for other repositories is
 # examples/.github/workflows/nightly-janitor.yml.
 name: Nightly janitor
 
