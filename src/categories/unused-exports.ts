@@ -7,47 +7,49 @@ import { analyzeProject } from '../analysis/project.js';
 import type { Category, CleanupItem } from '../types.js';
 import { editKeepingFormat } from '../util/format.js';
 
-function isPure(expr: ts.Expression): boolean {
+/** Functions and literals: evaluating one does nothing. */
+function isInert(expr: ts.Expression): boolean {
   if (ts.isArrowFunction(expr) || ts.isFunctionExpression(expr)) return true;
   if (ts.isStringLiteralLike(expr) || ts.isNumericLiteral(expr) || ts.isBigIntLiteral(expr)) return true;
   if (ts.isRegularExpressionLiteral(expr)) return true;
-  switch (expr.kind) {
-    case ts.SyntaxKind.TrueKeyword:
-    case ts.SyntaxKind.FalseKeyword:
-    case ts.SyntaxKind.NullKeyword:
-      return true;
-  }
+  return [ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword, ts.SyntaxKind.NullKeyword].includes(expr.kind);
+}
+
+function isPureProperty(p: ts.ObjectLiteralElementLike): boolean {
+  return ts.isMethodDeclaration(p) || (ts.isPropertyAssignment(p) && !ts.isComputedPropertyName(p.name) && isPure(p.initializer));
+}
+
+function isPure(expr: ts.Expression): boolean {
+  if (isInert(expr)) return true;
   if (ts.isParenthesizedExpression(expr) || ts.isAsExpression(expr) || ts.isSatisfiesExpression(expr)) {
     return isPure(expr.expression);
   }
   if (ts.isPrefixUnaryExpression(expr) && expr.operator === ts.SyntaxKind.MinusToken) return isPure(expr.operand);
   if (ts.isArrayLiteralExpression(expr)) return expr.elements.every((e) => !ts.isSpreadElement(e) && isPure(e));
-  if (ts.isObjectLiteralExpression(expr)) {
-    return expr.properties.every(
-      (p) =>
-        ts.isMethodDeclaration(p) ||
-        (ts.isPropertyAssignment(p) && !ts.isComputedPropertyName(p.name) && isPure(p.initializer)),
-    );
-  }
+  if (ts.isObjectLiteralExpression(expr)) return expr.properties.every(isPureProperty);
   return false;
+}
+
+/** A class member that runs code when the class is defined: a static block, a decorator, an impure static initializer. */
+function runsOnDefinition(m: ts.ClassElement): boolean {
+  if (ts.isClassStaticBlockDeclaration(m)) return true;
+  if (ts.canHaveDecorators(m) && ts.getDecorators(m)?.length) return true;
+  const isStatic = ts.canHaveModifiers(m) && ts.getModifiers(m)?.some((x) => x.kind === ts.SyntaxKind.StaticKeyword);
+  return Boolean(isStatic && ts.isPropertyDeclaration(m) && m.initializer && !isPure(m.initializer));
+}
+
+function isDeletableClass(stmt: ts.ClassDeclaration): boolean {
+  if (ts.getDecorators(stmt)?.length) return false;
+  const computedBase = (h: ts.HeritageClause) => h.types.some((t) => !ts.isIdentifier(t.expression) && !ts.isPropertyAccessExpression(t.expression));
+  if (stmt.heritageClauses?.some(computedBase)) return false;
+  return !stmt.members.some(runsOnDefinition);
 }
 
 /** Can the whole statement go without changing runtime behaviour (given the name is unreferenced)? */
 function isDeletable(stmt: ts.Statement): boolean {
   if (ts.isFunctionDeclaration(stmt) || ts.isInterfaceDeclaration(stmt) || ts.isTypeAliasDeclaration(stmt)) return true;
   if (ts.isEnumDeclaration(stmt)) return true;
-  if (ts.isClassDeclaration(stmt)) {
-    if (ts.getDecorators(stmt)?.length) return false;
-    if (stmt.heritageClauses?.some((h) => h.types.some((t) => !ts.isIdentifier(t.expression) && !ts.isPropertyAccessExpression(t.expression)))) {
-      return false;
-    }
-    return stmt.members.every((m) => {
-      if (ts.isClassStaticBlockDeclaration(m)) return false;
-      if (ts.canHaveDecorators(m) && ts.getDecorators(m)?.length) return false;
-      const isStatic = ts.canHaveModifiers(m) && ts.getModifiers(m)?.some((x) => x.kind === ts.SyntaxKind.StaticKeyword);
-      return !(isStatic && ts.isPropertyDeclaration(m) && m.initializer && !isPure(m.initializer));
-    });
-  }
+  if (ts.isClassDeclaration(stmt)) return isDeletableClass(stmt);
   if (ts.isVariableStatement(stmt)) {
     const decls = stmt.declarationList.declarations;
     return decls.length === 1 && (!decls[0]!.initializer || isPure(decls[0]!.initializer));
