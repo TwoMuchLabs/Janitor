@@ -120,7 +120,34 @@ export function parsePnpmOutdated(stdout: string): OutdatedEntry[] {
   return entries;
 }
 
-type Manager = 'npm' | 'pnpm';
+/**
+ * Parse `yarn outdated --json` from Yarn 1: newline-delimited JSON with one
+ * `table` record whose rows are [Package, Current, Wanted, Latest, ...].
+ */
+export function parseYarnOutdated(stdout: string): OutdatedEntry[] {
+  const entries = new Map<string, OutdatedEntry>();
+  for (const line of stdout.split('\n')) {
+    let record: { type?: string; data?: { head?: string[]; body?: unknown[][] } };
+    try {
+      record = JSON.parse(line) as typeof record;
+    } catch {
+      continue;
+    }
+    if (record.type !== 'table' || !record.data?.body) continue;
+    const head = record.data.head ?? [];
+    const col = (name: string, fallback: number) => (head.indexOf(name) >= 0 ? head.indexOf(name) : fallback);
+    const [iName, iCurrent, iWanted, iLatest] = [col('Package', 0), col('Current', 1), col('Wanted', 2), col('Latest', 3)];
+    for (const row of record.data.body) {
+      const [name, current, wanted, latest] = [row[iName], row[iCurrent], row[iWanted], row[iLatest]];
+      if (typeof name !== 'string' || typeof current !== 'string' || typeof wanted !== 'string') continue;
+      // The same package can appear once per workspace; one update covers them all.
+      if (!entries.has(name)) entries.set(name, { name, current, wanted, latest: String(latest ?? wanted) });
+    }
+  }
+  return [...entries.values()];
+}
+
+type Manager = 'npm' | 'pnpm' | 'yarn';
 
 const QUIET = ['--loglevel=error'];
 const NPM_FLAGS = ['--no-audit', '--no-fund', ...QUIET];
@@ -151,11 +178,30 @@ const MANAGERS: Record<Manager, {
     reinstall: ['install', '--frozen-lockfile', '--prefer-offline', ...QUIET],
     upperBound: true,
   },
+  yarn: {
+    lockfile: 'yarn.lock',
+    outdated: ['outdated', '--json'],
+    parse: parseYarnOutdated,
+    update: (name) => ['upgrade', name, '--silent', '--non-interactive'],
+    reinstall: ['install', '--frozen-lockfile', '--prefer-offline', '--silent', '--non-interactive'],
+    upperBound: false,
+  },
 };
 
+/** Yarn 2+ ("Berry") has no `outdated` command and a different lockfile; only Yarn 1 is supported. */
+function isYarnBerry(root: string): boolean {
+  try {
+    return !fs.readFileSync(path.join(root, 'yarn.lock'), 'utf8').slice(0, 300).includes('yarn lockfile v1');
+  } catch {
+    return false;
+  }
+}
+
 function detectManager(root: string): Manager | null {
-  for (const manager of ['npm', 'pnpm'] as const) {
-    if (fs.existsSync(path.join(root, MANAGERS[manager].lockfile))) return manager;
+  for (const manager of ['npm', 'pnpm', 'yarn'] as const) {
+    if (!fs.existsSync(path.join(root, MANAGERS[manager].lockfile))) continue;
+    if (manager === 'yarn' && isYarnBerry(root)) return null;
+    return manager;
   }
   return null;
 }
@@ -184,7 +230,11 @@ export const outdatedDeps: Category = {
       if (!hasDeps) return { items: [], notes: [] };
       return {
         items: [],
-        notes: ['Dependency updates need a committed `package-lock.json` (npm) or `pnpm-lock.yaml` (pnpm); skipped.'],
+        notes: [
+          fs.existsSync(path.join(ctx.root, 'yarn.lock'))
+            ? 'Dependency updates are not supported for Yarn 2 and later (no `yarn outdated`); skipped.'
+            : 'Dependency updates need a committed lockfile from npm, pnpm or Yarn 1; skipped.',
+        ],
       };
     }
     const m = MANAGERS[manager];

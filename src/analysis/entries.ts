@@ -79,6 +79,12 @@ const FRAMEWORK_ROOTS: { deps: string[]; globs: string[] }[] = [
   { deps: ['expo', 'react-native'], globs: ['{App,index}.*', 'app.config.*'] },
   { deps: ['gatsby'], globs: ['src/pages/**', 'src/templates/**', 'gatsby-*.*'] },
   { deps: ['@nestjs/core', '@angular/core'], globs: ['src/main*.*'] },
+  {
+    deps: ['@docusaurus/core'],
+    globs: ['src/{theme,pages,plugins,css}/**', 'docusaurus.config.*', 'sidebars*.*', '{docs,blog}/**'],
+  },
+  { deps: ['vitepress'], globs: ['.vitepress/**', '**/.vitepress/**'] },
+  { deps: ['@storybook/react', 'storybook'], globs: ['.storybook/**'] },
 ];
 
 const HTML_SCRIPT = /<script\b[^>]*\bsrc\s*=\s*["']([^"'?#]+)/gi;
@@ -133,17 +139,37 @@ export function mapToSources(declared: string, pkgDir: string, sources: Set<stri
     lookup(s);
   }
 
-  // Build output under a directory name we do not know (`distribution/index.js`
-  // built from `source/index.ts`): accept the same path under any sibling directory.
-  if (found.size === 0 && segments.length > 1 && !stem.includes('*')) {
-    const rest = segments.slice(1).join('/');
-    const firstDirs = new Set<string>();
+  // Build output laid out in a way we do not know (`distribution/index.js` from
+  // `source/index.ts`, or `dist/types/element/src/*.d.ts` from `src/*`): drop
+  // leading directories of the declared path until what is left exists in the
+  // package, trying it both in place and under each top-level directory.
+  if (found.size === 0 && segments.length > 1) {
+    const firstDirs = new Set<string>(['']);
     for (const f of sources) {
       if (!f.startsWith(prefix)) continue;
-      const first = f.slice(prefix.length).split('/')[0]!;
-      if (first !== segments[0]) firstDirs.add(first);
+      const parts = f.slice(prefix.length).split('/');
+      if (parts.length > 1) firstDirs.add(`${parts[0]}/`);
     }
-    for (const dir of firstDirs) lookup(`${prefix}${dir}/${rest}`);
+    for (let drop = 1; drop < segments.length && found.size === 0; drop++) {
+      const rest = segments.slice(drop).join('/');
+      if (rest.startsWith('*')) break;
+      for (const dir of firstDirs) {
+        if (drop === 1 && dir === '') continue; // already tried above as "output directory removed"
+        const candidate = `${prefix}${dir}${rest}`;
+        if (candidate.includes('*')) {
+          const re = new RegExp(`^${candidate.replace(/[.+^$()|[\]\\{}?]/g, '\\$&').replace(/\*/g, '.*')}(?:\\.[^/]*)?$`);
+          for (const f of sources) if (re.test(f)) found.add(f);
+        } else {
+          lookup(candidate);
+        }
+      }
+    }
+  }
+
+  // A wildcard that still matches nothing we can name publishes files we cannot
+  // tell apart from the rest, so the whole package is treated as public.
+  if (found.size === 0 && stem.includes('*')) {
+    for (const f of sources) if (f.startsWith(prefix)) found.add(f);
   }
   return [...found];
 }

@@ -81,6 +81,49 @@ export function declaredExports(stmt: ts.Statement): ExportDecl[] {
   return [];
 }
 
+/** Functions that load every file in a directory or matching a pattern. */
+const DIRECTORY_LOADER =
+  /^(?:readdir|readdirSync|readdirp|glob|globSync|globby|globbySync|fg|fastGlob|requireDirectory|requireDir|requireAll|importDir|importDirectory|loadDir|loadDirectory|autoload|autoLoad|walk|walkSync)$/;
+const PATH_HELPER = /^(?:join|resolve|dirname|basename|relative|normalize|extname|fileURLToPath|pathToFileURL)$/;
+
+function calleeName(expr: ts.Expression): string | null {
+  if (ts.isIdentifier(expr)) return expr.text;
+  if (ts.isPropertyAccessExpression(expr)) return expr.name.text;
+  return null;
+}
+
+/** `__dirname` or `import.meta.dirname`: "the directory this file is in". */
+function isOwnDirectory(expr: ts.Expression): boolean {
+  if (ts.isIdentifier(expr)) return expr.text === '__dirname';
+  return (
+    ts.isPropertyAccessExpression(expr) &&
+    expr.name.text === 'dirname' &&
+    ts.isMetaProperty(expr.expression) &&
+    expr.expression.keywordToken === ts.SyntaxKind.ImportKeyword
+  );
+}
+
+function isImportMetaGlob(expr: ts.Expression): boolean {
+  return (
+    ts.isPropertyAccessExpression(expr) &&
+    /^glob(?:Eager)?$/.test(expr.name.text) &&
+    ts.isMetaProperty(expr.expression) &&
+    expr.expression.keywordToken === ts.SyntaxKind.ImportKeyword
+  );
+}
+
+function stringLiterals(node: ts.Node, out: string[] = []): string[] {
+  if (ts.isStringLiteralLike(node)) out.push(node.text);
+  else ts.forEachChild(node, (child) => void stringLiterals(child, out));
+  return out;
+}
+
+/** The fixed directory part of a glob: `./modules/*.ts` -> `./modules/`. */
+function globBase(pattern: string): string {
+  const fixed = pattern.split(/[*{[?]/)[0]!;
+  return fixed.endsWith('/') ? fixed : fixed.slice(0, fixed.lastIndexOf('/') + 1);
+}
+
 const JSDOC_IMPORT = /import\(\s*['"]([^'"]+)['"]\s*\)/g;
 const COMMONJS_EXPORT = /\bmodule\.exports\b|\bexports\s*(?:\.[A-Za-z_$]|\[)/;
 
@@ -130,7 +173,11 @@ export function buildModuleGraph(root: string, files: string[]): ModuleGraph {
     };
 
     const protect = (relativeDir: string) => {
-      const joined = path.posix.normalize(path.posix.join(dir, relativeDir));
+      // A leading slash is relative to the project root (Vite's `/src/pages/*`).
+      const joined = relativeDir.startsWith('/')
+        ? path.posix.normalize(relativeDir.replace(/^\/+/, '') || '.')
+        : path.posix.normalize(path.posix.join(dir, relativeDir));
+      if (joined.startsWith('..')) return;
       dynamicPrefixes.add(joined === '.' ? '' : joined.replace(/\/?$/, '/'));
     };
 
@@ -172,6 +219,28 @@ export function buildModuleGraph(root: string, files: string[]): ModuleGraph {
         if (!isStaticSpecifier && /^\.\.?(\/|$)/.test(n.text)) add(n.text, [ALL]);
       } else if (ts.isCallExpression(n) && n.arguments.length > 0) {
         const callee = n.expression;
+        const name = calleeName(callee);
+        if (isImportMetaGlob(callee)) {
+          // import.meta.glob('./modules/*.ts'): every match is loaded, none is imported by name.
+          for (const pattern of stringLiterals(n.arguments[0]!)) if (!pattern.startsWith('!')) protect(globBase(pattern) || '.');
+        } else if (name === 'context' && ts.isPropertyAccessExpression(callee) && calleeName(callee.expression) === 'require') {
+          const first = n.arguments[0]!;
+          protect(ts.isStringLiteralLike(first) ? first.text : '.');
+        } else if (name && !PATH_HELPER.test(name)) {
+          // requireDirectory(__dirname), fs.readdirSync(path.join(__dirname, 'tasks')), glob('./jobs/*.js')
+          const passesOwnDirectory = n.arguments.some(isOwnDirectory);
+          if (passesOwnDirectory || DIRECTORY_LOADER.test(name)) {
+            const literals = n.arguments
+              .flatMap((arg) => stringLiterals(arg))
+              .map((text) => (/[*{[?]/.test(text) ? globBase(text) || '.' : text));
+            const explicit = literals.filter((text) => /^\.{0,2}\//.test(text));
+            // Bare words are only directory names when joined onto something
+            // (`path.join(__dirname, 'tasks')`); they never replace the default.
+            const words = literals.filter((text) => /^[\w@-][\w@/-]*$/.test(text));
+            if (explicit.length === 0) protect('.');
+            for (const target of [...explicit, ...words]) protect(target);
+          }
+        }
         const isLoader =
           callee.kind === ts.SyntaxKind.ImportKeyword ||
           (ts.isIdentifier(callee) && callee.text === 'require') ||

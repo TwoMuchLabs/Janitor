@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
-import { classifyUpdate, parseNpmOutdated, parsePnpmOutdated, planUpdates } from '../src/categories/outdated-deps.js';
+import { classifyUpdate, parseNpmOutdated, parsePnpmOutdated, parseYarnOutdated, planUpdates } from '../src/categories/outdated-deps.js';
 import { isFullyOn, nameVariants, parseRegistry, removeFlag, staleFlags } from '../src/categories/stale-flags.js';
 import { context, makeRepo, read } from './helpers.js';
 
@@ -116,4 +116,25 @@ test('parsePnpmOutdated treats the locked version as current and never targets a
   ]);
   assert.match(notes.join('\n'), /`react` 19\.0\.0 -> 20\.0\.0/);
   assert.deepEqual(parsePnpmOutdated('not json'), []);
+});
+
+test('parseYarnOutdated reads the Yarn 1 table and merges workspace duplicates', () => {
+  const out = [
+    '{"type":"info","data":"Color legend"}',
+    JSON.stringify({
+      type: 'table',
+      data: {
+        head: ['Package', 'Current', 'Wanted', 'Latest', 'Workspace', 'Package Type', 'URL'],
+        body: [
+          ['@codemirror/commands', '6.10.2', '6.11.1', '6.11.1', 'app', 'dependencies', 'x'],
+          ['@codemirror/commands', '6.10.2', '6.11.1', '6.11.1', 'utils', 'dependencies', 'x'],
+          ['@babel/preset-env', '7.26.9', '7.26.9', '8.0.7', 'root', 'devDependencies', 'x'],
+        ],
+      },
+    }),
+    'not json',
+  ].join('\n');
+  const { updates, notes } = planUpdates(parseYarnOutdated(out), [], 10);
+  assert.deepEqual(updates, [{ name: '@codemirror/commands', from: '6.10.2', to: '6.11.1', kind: 'minor' }]);
+  assert.match(notes.join('\n'), /`@babel\/preset-env` 7\.26\.9 -> 8\.0\.7/);
 });

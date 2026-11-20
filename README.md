@@ -116,7 +116,7 @@ and you are returned to where you started.
 | `dead-files` | JS/TS files unreachable from every entry point | Deletes the file (with any dead files that import it) |
 | `unused-exports` | Named exports no other module imports | Deletes the declaration if nothing else uses it and it has no side effects; otherwise just drops `export` |
 | `stale-flags` | Flags in a JSON registry that nothing references | Removes the registry entry. Flags fully on for 90+ days are **reported**, not inlined |
-| `outdated-deps` | npm or pnpm packages behind within their declared range | `npm update <pkg>` / `pnpm update <pkg>`, one package per step, lockfile only |
+| `outdated-deps` | npm, pnpm or Yarn 1 packages behind within their declared range | `npm update` / `pnpm update` / `yarn upgrade`, one package per step, lockfile only |
 
 The analysis uses the TypeScript compiler's own module resolution, so `tsconfig`
 `paths`, `.js` -> `.ts` specifiers and index files resolve as they do in your build.
@@ -125,13 +125,15 @@ It is deliberately biased towards leaving things alone:
 - Entry points come from `package.json` (`main`, `module`, `exports`, `bin`,
   script arguments, mapped from the build directory back to source), from scripts an
   HTML page loads, and from the framework in use: Next.js, SvelteKit, Remix / React
-  Router, Nuxt, Astro, Expo Router, React Native, Gatsby, NestJS and Angular each
-  contribute their route and entry files. Tests, fixtures, `*.config.*`, dotfiles and
+  Router, Nuxt, Astro, Expo Router, React Native, Gatsby, NestJS, Angular, Docusaurus,
+  VitePress and Storybook each contribute their route and entry files. Tests, fixtures, `*.config.*`, dotfiles and
   `scripts/` always count as used.
 - Any relative-path string that resolves to a source file counts as a use
   (`jest.mock('./x')`, `new Worker('./x.js')`, `new URL('./x.js', import.meta.url)`).
 - ``import(`./locales/${lang}.js`)`` protects everything under `./locales/`; a fully
   dynamic `import(x)` / `require(x)` protects the importing file's directory.
+- Files loaded by pattern or by listing a directory are kept: `import.meta.glob('./modules/*.ts')`,
+  `require.context('./icons')`, `requireDirectory(__dirname)`, `fs.readdirSync(path.join(__dirname, 'tasks'))`.
 - A file named in any non-code file (Dockerfile, workflow YAML, HTML, `.vue`, ...) or in the
   docs is kept, and an export whose name appears in a non-code file is kept.
 - A file that nothing imports and that exports nothing is treated as a script someone runs
@@ -142,7 +144,8 @@ It is deliberately biased towards leaving things alone:
   `Button.ios.tsx` beside `Button.tsx`) is kept: build scripts and bundlers swap these in
   by name, and tests on one platform do not notice another's variant missing.
 - A wildcard in package.json `exports` (`"./unsafe/*": "./lib/*"`) publishes every file
-  beneath it, so all of them are treated as public API.
+  beneath it, so all of them are treated as public API. If the wildcard points into a build
+  layout that cannot be traced back to source, the whole package is treated as public.
 - Files at the top of the repository and tool files loaded by convention (`gulpfile.js`,
   `karma.conf.js`, `jest.setup.ts`) are never candidates.
 - An export merged with a namespace of the same name is left alone.
@@ -301,20 +304,39 @@ export const removeTodoFiles: Category = {
 ## How it has been tested
 
 Besides its unit tests, Janitor has been dry-run on its own code, on four Two Much Labs
-repositories and on ten public projects of different shapes: express, commander.js,
-axios, ky, uuid, zod, vercel/commerce, a React Native template, fastify and the
-SvelteKit realworld app. Nothing was sent to those projects.
+repositories and on fifteen public projects of different shapes:
 
-Those runs are where most of the rules above came from. Seven times it proposed
-something that the project's own tests would not have caught: hand-run scripts, files a
-build swaps in by name, files published through a wildcard export, a tool file loaded
-by convention, a compiler fixture, a nested package outside the checks, and exports
-judged without knowing the entry point. Each is now a rule with a regression test.
-Where its findings were checked by hand (ky, vercel/commerce, the React Native
-template, Sarvavox) they were correct.
+| Shape | Projects |
+|---|---|
+| Libraries | express, commander.js, axios, ky, uuid, yup, fastify |
+| Monorepos | zod (pnpm), excalidraw (Yarn 1 workspaces) |
+| Framework apps | vercel/commerce (Next.js), sveltejs/realworld (SvelteKit), nuxt/movies (Nuxt), vitesse (Vue + Vite), a React Native / Expo template |
+| Large application | outline (about 2,500 source files, scanned in a few seconds) |
 
-Fourteen codebases is still a small sample. Treat its pull requests as proposals to
-review, not as changes to merge unread.
+Nothing was sent to those projects.
+
+Those runs are where most of the rules above came from. Ten times it proposed
+something the project's own tests would probably not have caught:
+
+- scripts run by hand (a lab repo)
+- files a build swaps in by name (uuid)
+- files published through a wildcard export (axios, excalidraw)
+- a tool file loaded by convention (axios)
+- a compiler fixture (zod)
+- a nested package outside the checks (a lab repo)
+- exports judged without knowing the entry point (ky)
+- modules loaded by `import.meta.glob` (vitesse)
+- thirty queue processors and tasks loaded by listing their directory (outline)
+- a documentation theme override (excalidraw)
+
+Each is now a rule with a regression test. Where its remaining findings were checked
+by hand (ky, vercel/commerce, the React Native template, Sarvavox, and samples from
+outline, excalidraw and yup) they were correct.
+
+Most of this was dry runs checked by hand. Its changes have been verified by a
+project's own checks on Sarvavox, ky and axios only. Nineteen codebases is still a
+small sample: treat its pull requests as proposals to review, not as changes to merge
+unread.
 
 ## Limitations (v0.1)
 
@@ -326,8 +348,8 @@ review, not as changes to merge unread.
 - `export { a, b }` lists, `export default` and CommonJS `module.exports` are not pruned.
 - Removing an export can leave an import that only it used. With `noUnusedLocals`
   or a lint step in `verify`, that step is reverted rather than fixed up.
-- Dependency updates support npm (`package-lock.json`) and pnpm (`pnpm-lock.yaml`), at the
-  repository root only. Yarn and Bun projects are skipped. With pnpm the PR states the newest
+- Dependency updates support npm (`package-lock.json`), pnpm (`pnpm-lock.yaml`) and Yarn 1
+  (`yarn.lock`), at the repository root only. Yarn 2 and later, and Bun, are skipped. With pnpm the PR states the newest
   version available; the update stops wherever the declared range ends.
 - Flag registries must be JSON. Flags defined in code or in a hosted service are not detected.
 - The janitor is only as safe as your verification suite. Code that no test, build
@@ -338,7 +360,7 @@ review, not as changes to merge unread.
 ```bash
 npm ci
 npm run typecheck
-npm test          # 52 tests; the engine suite drives real temporary git repositories
+npm test          # 56 tests; the engine suite drives real temporary git repositories
 npm run build
 ```
 

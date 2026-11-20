@@ -320,3 +320,53 @@ test('an export merged with a namespace of the same name is left alone', async (
   });
   assert.deepEqual(ids((await unusedExports.scan(context(root))).items), ['unused-export:src/schema.ts#other']);
 });
+
+test('dead-files: files loaded by a glob or by listing a directory are kept', async () => {
+  const root = makeRepo({
+    'package.json': pkg(),
+    'src/index.ts': [
+      `import './queues/index';`,
+      `import './jobs/runner';`,
+      `const modules = import.meta.glob<{ install: () => void }>('./modules/*.ts', { eager: true });`,
+      `console.log(modules);`,
+      '',
+    ].join('\n'),
+    'src/modules/pinia.ts': `export const install = () => {};\n`,
+    'src/modules/pwa.ts': `export const install = () => {};\n`,
+    // requireDirectory(__dirname): everything beside the index is loaded
+    'src/queues/index.ts': `import { requireDirectory } from '../utils/fs';\nrequireDirectory(__dirname);\n`,
+    'src/queues/EmailProcessor.ts': `export default class EmailProcessor {}\n`,
+    'src/utils/fs.ts': `export const requireDirectory = (dir: string) => dir;\n`,
+    // readdirSync on a sub-directory
+    'src/jobs/runner.ts': `import fs from 'node:fs';\nimport path from 'node:path';\nfs.readdirSync(path.join(__dirname, 'tasks'), 'utf8');\n`,
+    'src/jobs/tasks/cleanup.ts': `export const run = () => {};\n`,
+    // reading one named file is not loading a directory
+    'src/reports/make.ts': `import fs from 'node:fs';\nimport path from 'node:path';\nexport const t = fs.readFileSync(path.join(__dirname, 'template.txt'));\n`,
+    'src/reports/forgotten.ts': `export const f = 1;\n`,
+  });
+  const { items } = await deadFiles.scan(context(root));
+  assert.deepEqual(ids(items), ['dead-file:src/reports/forgotten.ts', 'dead-file:src/reports/make.ts']);
+});
+
+test('published paths are mapped through unfamiliar build layouts', async () => {
+  const sources = new Set(['packages/element/src/index.ts', 'packages/element/src/types.ts', 'packages/element/tests/a.test.ts']);
+  assert.deepEqual(
+    mapToSources('./dist/types/element/src/*.d.ts', 'packages/element', sources).sort(),
+    ['packages/element/src/index.ts', 'packages/element/src/types.ts'],
+  );
+  assert.deepEqual(mapToSources('./dist/types/element/src/index.d.ts', 'packages/element', sources), ['packages/element/src/index.ts']);
+  // A wildcard that maps to nothing we can name makes the whole package public.
+  const flat = new Set(['packages/ui/index.tsx', 'packages/ui/components/Button.tsx', 'other/x.ts']);
+  assert.deepEqual(mapToSources('./dist/types/ui/*.d.ts', 'packages/ui', flat).sort(), ['packages/ui/components/Button.tsx', 'packages/ui/index.tsx']);
+});
+
+test('Docusaurus theme overrides are entry points', async () => {
+  const root = makeRepo({
+    'package.json': JSON.stringify({ name: 'docs', dependencies: { '@docusaurus/core': '3.0.0' } }),
+    'docusaurus.config.js': `module.exports = {};\n`,
+    'src/theme/MDXComponents.js': `import Highlight from '../components/Highlight';\nexport default { highlight: Highlight };\n`,
+    'src/components/Highlight.js': `export default function Highlight() {}\n`,
+    'src/components/Unused.js': `export default function Unused() {}\n`,
+  });
+  assert.deepEqual(ids((await deadFiles.scan(context(root))).items), ['dead-file:src/components/Unused.js']);
+});
