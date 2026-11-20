@@ -24,7 +24,7 @@ function identifiersOutsideImports(sf: ts.SourceFile): Set<string> {
 }
 
 /** Past the blanks and the one line break that follow a statement. */
-function endOfLine(text: string, end: number): number {
+export function endOfLine(text: string, end: number): number {
   while (text[end] === ' ' || text[end] === '\t') end++;
   if (text[end] === '\r') end++;
   if (text[end] === '\n') end++;

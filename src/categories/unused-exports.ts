@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import ts from 'typescript';
-import { collectIdentifiers, tidyImports } from '../analysis/imports.js';
+import { collectIdentifiers, endOfLine, tidyImports } from '../analysis/imports.js';
 import { ALL, declaredExports } from '../analysis/module-graph.js';
 import { analyzeProject } from '../analysis/project.js';
 import type { Category, CleanupItem } from '../types.js';
@@ -79,52 +79,70 @@ type RemovalKind = 'deleted' | 'unexported';
  * Returns null when the export is not there (already cleaned up) or is in a
  * shape that is not handled.
  */
-export function removeExport(text: string, fileName: string, name: string): { text: string; kind: RemovalKind } | null {
-  const sf = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true);
+interface Removal {
+  text: string;
+  kind: RemovalKind;
+}
+
+interface Span {
+  start: number;
+  end: number;
+}
+
+/** Back to the start of the line, when only blanks come before `start` on it. */
+function startOfLine(text: string, start: number): number {
+  let lineStart = start;
+  while (lineStart > 0 && (text[lineStart - 1] === ' ' || text[lineStart - 1] === '\t')) lineStart--;
+  return lineStart === 0 || text[lineStart - 1] === '\n' ? lineStart : start;
+}
+
+/** A whole declaration with its JSDoc and its line, widened so that no double, leading or trailing blank line is left behind. */
+function declarationSpan(stmt: ts.Statement, sf: ts.SourceFile, text: string): Span {
+  let start = startOfLine(text, stmt.getStart(sf, true));
+  let end = endOfLine(text, stmt.end);
+  // Do not leave a double blank line where the declaration used to be.
+  if (start > 0 && text[start - 1] === '\n' && (start < 2 || text[start - 2] === '\n') && text[end] === '\n') end++;
+  // ...or a trailing blank line when it was the last thing in the file.
+  if (end === text.length) while (start > 1 && text[start - 1] === '\n' && text[start - 2] === '\n') start--;
+  // ...or a leading one when it was the first.
+  if (start === 0) while (text[end] === '\n' || text[end] === '\r') end++;
+  return { start, end };
+}
+
+/** Just the `export` keyword and the blanks after it. */
+function exportKeywordSpan(stmt: ts.Statement, sf: ts.SourceFile, text: string): Span {
+  const mod = ts.getModifiers(stmt as ts.HasModifiers)!.find((m) => m.kind === ts.SyntaxKind.ExportKeyword)!;
+  let end = mod.end;
+  while (text[end] === ' ' || text[end] === '\t') end++;
+  return { start: mod.getStart(sf), end };
+}
+
+/** The statements that export `name`, or null when it is not exported or is in a shape that is not handled. */
+function exportingStatements(sf: ts.SourceFile, name: string): ts.Statement[] | null {
   const matches = sf.statements.filter((s) => declaredExports(s).some((e) => e.name === name));
   if (matches.length === 0) return null;
   if (sf.statements.some((s) => ts.isModuleDeclaration(s) && ts.isIdentifier(s.name) && s.name.text === name)) return null;
   // `export const a = 1, b = 2;` cannot be partially un-exported.
   if (matches.some((s) => ts.isVariableStatement(s) && s.declarationList.declarations.length !== 1)) return null;
+  return matches;
+}
+
+export function removeExport(text: string, fileName: string, name: string): Removal | null {
+  const sf = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true);
+  const matches = exportingStatements(sf, name);
+  if (!matches) return null;
 
   const referencedElsewhere = countIdentifier(sf, name) > matches.length;
   const deletable = !referencedElsewhere && matches.every(isDeletable);
-
-  const edits: { start: number; end: number }[] = [];
-  for (const stmt of matches) {
-    if (deletable) {
-      let start = stmt.getStart(sf, true);
-      let lineStart = start;
-      while (lineStart > 0 && (text[lineStart - 1] === ' ' || text[lineStart - 1] === '\t')) lineStart--;
-      if (lineStart === 0 || text[lineStart - 1] === '\n') start = lineStart;
-      let end = stmt.end;
-      while (text[end] === ' ' || text[end] === '\t') end++;
-      if (text[end] === '\r') end++;
-      if (text[end] === '\n') end++;
-      // Do not leave a double blank line where the declaration used to be.
-      if (start > 0 && text[start - 1] === '\n' && (start < 2 || text[start - 2] === '\n') && text[end] === '\n') end++;
-      // ...or a trailing blank line when it was the last thing in the file.
-      if (end === text.length) while (start > 1 && text[start - 1] === '\n' && text[start - 2] === '\n') start--;
-      // ...or a leading one when it was the first.
-      if (start === 0) while (text[end] === '\n' || text[end] === '\r') end++;
-      edits.push({ start, end });
-    } else {
-      const mod = ts.getModifiers(stmt as ts.HasModifiers)!.find((m) => m.kind === ts.SyntaxKind.ExportKeyword)!;
-      let end = mod.end;
-      while (text[end] === ' ' || text[end] === '\t') end++;
-      edits.push({ start: mod.getStart(sf), end });
-    }
-  }
-
+  const spans = matches.map((stmt) => (deletable ? declarationSpan(stmt, sf, text) : exportKeywordSpan(stmt, sf, text)));
   let out = text;
-  for (const e of edits.sort((a, b) => b.start - a.start)) out = out.slice(0, e.start) + out.slice(e.end);
-  if (deletable) {
-    // Whatever the deleted code was the last user of should not be left imported.
-    const mentioned = new Set<string>();
-    for (const stmt of matches) collectIdentifiers(stmt, mentioned);
-    out = tidyImports(out, fileName, mentioned);
-  }
-  return { text: out, kind: deletable ? 'deleted' : 'unexported' };
+  for (const e of spans.sort((x, y) => y.start - x.start)) out = out.slice(0, e.start) + out.slice(e.end);
+  if (!deletable) return { text: out, kind: 'unexported' };
+
+  // Whatever the deleted code was the last user of should not be left imported.
+  const mentioned = new Set<string>();
+  for (const stmt of matches) collectIdentifiers(stmt, mentioned);
+  return { text: tidyImports(out, fileName, mentioned), kind: 'deleted' };
 }
 
 type Project = Awaited<ReturnType<typeof analyzeProject>>;
