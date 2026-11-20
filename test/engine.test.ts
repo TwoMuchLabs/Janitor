@@ -321,3 +321,14 @@ test('stops trying a category once single items keep failing to apply', async ()
   assert.ok(statuses.includes('skipped'));
   assert.ok(!exists(root, 'junk-a.txt'), 'the next category still runs');
 });
+
+test('says so when a group fails together but every part passes alone', async () => {
+  const root = makeRepo(baseFiles);
+  // A check that fails on its second run only (the first is the baseline): a flaky test.
+  const flaky = `node -e "const fs=require('fs');const f='.git/runs';const n=(fs.existsSync(f)?Number(fs.readFileSync(f,'utf8')):0)+1;fs.writeFileSync(f,String(n));process.exit(n===2?1:0)"`;
+  const report = await run(root, [fakeCategory('a', [deleteItem('junk-a.txt'), deleteItem('junk-b.txt')])], {
+    verify: [flaky],
+  });
+  assert.ok(report.steps.every((s) => s.status === 'kept'));
+  assert.match(report.notes.map((n) => n.note).join(' '), /flaky/);
+});

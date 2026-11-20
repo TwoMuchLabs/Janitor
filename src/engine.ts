@@ -185,17 +185,18 @@ export async function runJanitor(options: RunOptions): Promise<RunReport> {
   const APPLY_FAILURE_LIMIT = 2;
   const applyFailures = new Map<string, number>();
 
-  const processGroup = async (cat: Category, items: CleanupItem[]): Promise<void> => {
+  /** Resolves to true when every item ended up kept, proposed or a no-op. */
+  const processGroup = async (cat: Category, items: CleanupItem[]): Promise<boolean> => {
     if ((applyFailures.get(cat.name) ?? 0) >= APPLY_FAILURE_LIMIT) {
       record(cat, items, {
         status: 'skipped',
         reason: `the ${APPLY_FAILURE_LIMIT} before could not be applied at all, so the rest were not tried`,
       });
-      return;
+      return false;
     }
     if (report.verifyRuns >= config.maxVerifyRuns) {
       record(cat, items, { status: 'skipped', reason: `verification budget of ${config.maxVerifyRuns} runs exhausted` });
-      return;
+      return false;
     }
 
     let failure: StepFailure | undefined;
@@ -213,7 +214,7 @@ export async function runJanitor(options: RunOptions): Promise<RunReport> {
       if (!(await git.stageAll())) {
         record(cat, items, { status: 'noop' });
         log(`[${cat.name}] ${items.length} item(s) changed nothing; skipped`);
-        return;
+        return true;
       }
       report.verifyRuns++;
       log(`[${cat.name}] verifying ${items.length} item(s)`);
@@ -223,7 +224,7 @@ export async function runJanitor(options: RunOptions): Promise<RunReport> {
         await revert(cat);
         record(cat, items, { status: 'proposed' });
         log(`[${cat.name}] ${items.length} item(s) pass the checks when removed; proposed, not applied`);
-        return;
+        return true;
       }
       if (result.ok) {
         const sha = await git.commitStaged(commitMessage(cat, items, verify));
@@ -232,7 +233,7 @@ export async function runJanitor(options: RunOptions): Promise<RunReport> {
         lastGood = sha;
         record(cat, items, { status: 'kept', sha, stats });
         log(`[${cat.name}] kept ${items.length} item(s) as ${sha.slice(0, 9)}`);
-        return;
+        return true;
       }
       const f = result.failed!;
       failure = { command: f.command, exitCode: f.exitCode, timedOut: f.timedOut, outputTail: f.outputTail };
@@ -243,11 +244,20 @@ export async function runJanitor(options: RunOptions): Promise<RunReport> {
 
     if (items.length > 1 && config.bisect) {
       const mid = Math.ceil(items.length / 2);
-      await processGroup(cat, items.slice(0, mid));
-      await processGroup(cat, items.slice(mid));
-      return;
+      const first = await processGroup(cat, items.slice(0, mid));
+      const second = await processGroup(cat, items.slice(mid));
+      if (first && second && failure.command !== '(apply)') {
+        // Together they failed, apart they all passed. Changes can interact, but far more
+        // often this is a check that does not give the same answer twice.
+        report.notes.push({
+          category: cat.name,
+          note: `\`${failure.command}\` failed on ${items.length} changes together, then passed on every one of them separately. That usually means the check is flaky. The changes were kept because each passed, so give them a second look.`,
+        });
+      }
+      return first && second;
     }
     record(cat, items, { status: 'reverted', failure });
+    return false;
   };
 
   try {

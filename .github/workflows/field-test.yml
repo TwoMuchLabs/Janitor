@@ -115,6 +115,7 @@ jobs:
 
       - name: Install the project
         working-directory: target
+        timeout-minutes: 20
         run: ${{ matrix.install }}
 
       # Installing often rewrites a lockfile or leaves tool state behind. Janitor rightly

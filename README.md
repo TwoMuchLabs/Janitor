@@ -366,21 +366,43 @@ Each is now a rule with a regression test. Where its remaining findings were che
 by hand (ky, vercel/commerce, the React Native template, Sarvavox, elk, and samples
 from outline, excalidraw, yup and vue-pure-admin) they were correct.
 
-Most of this was dry runs checked by hand. Its changes have also been run through a
-project's own checks on six codebases:
+Most of this was dry runs checked by hand. Since then a **field test** runs Janitor on
+GitHub's own runners against twelve of these projects, with each project's own checks,
+browser tests included. It clones them read-only, sends nothing back, and deletes dead
+files on purpose, since that is the behaviour that most needs testing. The
+[workflow](.github/workflows/field-test.yml) runs every Saturday. Its latest run, on
+20 November 2026:
 
-| Project | Changes kept | Checked with |
+| Project | Result | Checked with |
 |---|---|---|
-| Sarvavox (lab, on GitHub) | 2 unused exports | its build and check scripts; merged |
-| ky | 11 unused exports | lint, build, typecheck |
-| axios | dependency updates | build and unit tests |
-| vercel/commerce | 10 unused exports | typecheck; changed files pass its formatter |
-| excalidraw | 5 unused exports | typecheck, formatter, and its linter on the changed files |
-| vitesse | 19 pnpm dependency updates | typecheck; one update that failed to install was isolated and reverted |
+| yup | 28 unused exports removed | typecheck, build, lint and tests |
+| vue-pure-admin | 1 dead file, 18 unused exports, 20 updates | typecheck and build |
+| vitesse | 20 dependency updates | typecheck, build and unit tests |
+| ky | 11 unused exports removed | lint, build, typecheck, tests in three browsers |
+| vercel/commerce | 10 unused exports removed; updates could not be installed | typecheck |
+| axios | 9 dependency updates | build and unit tests, less one test that fails untouched |
+| excalidraw | 5 unused exports removed; 6 updates changed nothing | typecheck, formatter, linter, app tests |
+| commander.js | 5 dependency updates | typecheck, lint, format and tests |
+| elk | 3 unused exports removed; updates could not be installed | typecheck and unit tests |
+| express, fastify, uuid | nothing to clean | their full test suites |
 
-These were run in a sandbox without a browser or open network access, so browser
-tests, and test files or builds that fetch from the network, were left out. None of
-the six is a full run of a project's complete suite except Sarvavox.
+That is 130 changes kept across twelve projects, each one passing the project's checks,
+and none reverted for breaking them. Passing checks is not the same as being right, which
+is why the hand-checking above still matters, and the one deleted file was confirmed by
+hand to have no users.
+
+The field test's first run found three faults in Janitor itself, all fixed and tested:
+
+- When pnpm's own update command failed (elk, commerce), Janitor retried about forty
+  times. It now stops after two items in a row cannot be applied.
+- Updates that changed nothing (excalidraw) vanished from the report. They are now listed.
+- The refusal to start on a dirty tree did not name the files in the way (yup).
+
+It also met a flaky check: three changes on elk failed together and then passed one at a
+time. Janitor now says so in the pull request when that happens.
+
+Sarvavox, a lab project, runs Janitor nightly through the Action; its pull requests have
+been reviewed and merged.
 
 Twenty-six codebases is still a small sample, and new shapes kept turning up new
 mistakes to the end: treat its pull requests as proposals to review, not as changes
@@ -402,6 +424,8 @@ to merge unread.
   (`yarn.lock`), at the repository root only. Yarn 2 and later, and Bun, are skipped. With pnpm the PR states the newest
   version available; the update stops wherever the declared range ends.
 - Flag registries must be JSON. Flags defined in code or in a hosted service are not detected.
+- If the package manager's own update command fails in your repository, dependency updates
+  are reported as not applied; Janitor does not try to repair the install.
 - The janitor is only as safe as your verification suite. Code that no test, build
   or typecheck exercises can be removed without anything failing; review the PR.
 
@@ -410,7 +434,7 @@ to merge unread.
 ```bash
 npm ci
 npm run typecheck
-npm test          # 65 tests; the engine suite drives real temporary git repositories
+npm test          # 67 tests; the engine suite drives real temporary git repositories
 npm run build
 ```
 
