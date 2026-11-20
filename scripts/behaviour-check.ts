@@ -17,7 +17,8 @@
  *   paths     mapToSources() for package.json paths built from each repository's files:
  *             build outputs, wildcards, nested packages, paths outside the package
  *   config    resolveConfig() on 4,000 made-up config objects, valid and not
- *   engine    the safe-apply loop on small repositories with made-up categories: steps
+ *   engine    the safe-apply loop on small repositories with made-up categories (70 at
+ *             random, six written by hand for sequences chance is unlikely to hit): steps
  *             that pass, break the checks, cannot be applied, change nothing or interact;
  *             bisecting on and off; a verification budget; propose-only; every refusal;
  *             the report, the PR description, the commits made and the tree left behind
@@ -232,11 +233,12 @@ const SHAPES: Record<string, string> = {
   'src/worker.js': 'postMessage(1);\n',
   'src/asset-loader.ts': 'export const load = 1;\n',
   'src/mocked.ts': 'export const m = 1;\n',
-  'src/loaders.ts': "const pages = import.meta.glob('./pages/*.ts');\nconst eager = import.meta.globEager(['/src/eager/**', '!./pages/skip.ts']);\nconst ctx = require.context('./ctx', true);\nconst ctx2 = require.context(dirVar);\nconst lang = import(`./locales/${name}.js`);\nconst any = import(somewhere);\nconst lit = import('./lazy');\nconst res = require.resolve('./resolved');\nfs.readdirSync(path.join(__dirname, 'tasks'));\nrequireDirectory(__dirname);\nglob('./jobs/*.js');\nglobby(['../outside/*.js', '/abs/*.js']);\nreaddir(import.meta.dirname);\npath.join(__dirname, 'not-a-loader');\nwalk('./walked/');\nexport {};\n",
+  'src/loaders.ts': "const pages = import.meta.glob('./pages/*.ts');\nconst eager = import.meta.globEager(['/src/eager/**', '!./pages/skip.ts']);\nconst ctx = require.context('./ctx', true);\nconst ctx2 = require.context(dirVar);\nconst lang = import(`./locales/${name}.js`);\nconst pre = import(`./prefixed/part-${name}.js`);\nglob('../../far-outside/*.js');\nconst any = import(somewhere);\nconst lit = import('./lazy');\nconst res = require.resolve('./resolved');\nfs.readdirSync(path.join(__dirname, 'tasks'));\nrequireDirectory(__dirname);\nglob('./jobs/*.js');\nglobby(['../outside/*.js', '/abs/*.js']);\nreaddir(import.meta.dirname);\npath.join(__dirname, 'not-a-loader');\nwalk('./walked/');\nexport {};\n",
   'src/pages/home.ts': 'export const page = 1;\n',
   'src/eager/e.ts': 'export const e = 1;\n',
   'src/ctx/c.ts': 'export const c = 1;\n',
   'src/locales/en.js': 'export default {};\n',
+  'src/prefixed/part-a.js': 'export default {};\n',
   'src/lazy.ts': 'export const lazy = 1;\n',
   'src/resolved.ts': 'export const resolved = 1;\n',
   'src/tasks/t.ts': 'export const t = 1;\n',
@@ -334,85 +336,152 @@ for (const group of rules.notAll) if (group.every((f) => !fs.existsSync(f))) { c
 for (const f of rules.poison) if (fs.existsSync(f)) { console.error('poison ' + f); process.exit(4); }
 `;
 
+type ItemKind = 'delete' | 'write' | 'same' | 'throw' | 'poison' | 'two';
+interface ItemSpec { kind: ItemKind; file: string; other: string }
+interface CategorySpec { behaviour: 'plain' | 'scan-throws' | 'scan-dirties' | 'notes' | 'after-revert' | 'empty'; countsAsDeadCode: boolean; items: ItemSpec[] }
+interface EngineCase {
+  files: string[];
+  rules: { must: string[]; notAll: string[][]; poison: string[]; litter: boolean };
+  ignoreLitter: boolean;
+  categories: CategorySpec[];
+  setup: 'ok' | 'dirty' | 'untracked' | 'no-verify' | 'unverified' | 'baseline' | 'branch' | 'not-a-repo' | 'detached';
+  bisect: boolean;
+  maxVerifyRuns: number;
+  branchPrefix: string;
+  twoChecks: boolean;
+  dryRun: boolean;
+  proposeOnly?: string[];
+}
+
+function madeUpCase(rng: ReturnType<typeof random>): EngineCase {
+  const files = Array.from({ length: 4 + rng.int(6) }, (_, i) => `f${i}.txt`);
+  const rules = {
+    must: rng.sample(files, rng.int(3)),
+    notAll: rng.chance(0.4) ? [rng.sample(files, 2)] : [],
+    poison: rng.chance(0.3) ? ['poison.txt'] : [],
+    litter: rng.chance(0.3),
+  };
+  const ignoreLitter = rng.chance(0.5);
+  const item = (): ItemSpec => ({ file: rng.pick(files), kind: rng.pick(['delete', 'delete', 'delete', 'write', 'same', 'throw', 'poison', 'two']), other: rng.pick(files) });
+  const categories = Array.from({ length: 1 + rng.int(3) }, (): CategorySpec => {
+    const behaviour = rng.pick(['plain', 'plain', 'plain', 'scan-throws', 'scan-dirties', 'notes', 'after-revert', 'empty'] as const);
+    const items = behaviour === 'empty' ? [] : Array.from({ length: 1 + rng.int(6) }, item);
+    return { behaviour, items, countsAsDeadCode: rng.chance(0.6) };
+  });
+  const setup = rng.pick(['ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'dirty', 'untracked', 'no-verify', 'unverified', 'baseline', 'branch', 'not-a-repo', 'detached'] as const);
+  return {
+    files, rules, ignoreLitter, categories, setup,
+    bisect: rng.chance(0.8),
+    maxVerifyRuns: rng.pick([200, 200, 200, 3, 1]),
+    branchPrefix: rng.pick(['nightly-janitor', 'nightly-janitor', 'tidy/up']),
+    twoChecks: rng.chance(0.2),
+    dryRun: rng.chance(0.12),
+    proposeOnly: rng.chance(0.25) ? ['cat0'] : rng.chance(0.1) ? ['cat1', 'nope'] : undefined,
+  };
+}
+
+/** Sequences the made-up cases are unlikely to hit; each was missed by a planted bug before it was written down. */
+function handmadeCases(): EngineCase[] {
+  const files = ['f0.txt', 'f1.txt', 'f2.txt', 'f3.txt'];
+  const base: EngineCase = {
+    files, rules: { must: [], notAll: [], poison: [], litter: false }, ignoreLitter: false, categories: [], setup: 'ok',
+    bisect: true, maxVerifyRuns: 200, branchPrefix: 'nightly-janitor', twoChecks: false, dryRun: false,
+  };
+  const item = (kind: ItemKind, file: string): ItemSpec => ({ kind, file, other: file });
+  const plain = (items: ItemSpec[]): CategorySpec => ({ behaviour: 'plain', countsAsDeadCode: true, items });
+  return [
+    // A change that cannot be applied, one that can, another that cannot: the count of failures starts again.
+    { ...base, categories: [plain([item('throw', 'f0.txt'), item('delete', 'f0.txt'), item('throw', 'f1.txt'), item('delete', 'f1.txt')])] },
+    // Three in a row that cannot be applied: the rest are not tried.
+    { ...base, categories: [plain([item('throw', 'f0.txt'), item('throw', 'f1.txt'), item('throw', 'f2.txt'), item('delete', 'f3.txt')])] },
+    // Proposed only: together the second cannot be applied, apart each passes. That is not a flaky check.
+    { ...base, proposeOnly: ['cat0'], categories: [plain([item('delete', 'f0.txt'), item('delete', 'f0.txt')])] },
+    // Together they break the checks, apart each passes: reported as a likely flaky check.
+    { ...base, rules: { ...base.rules, notAll: [['f0.txt', 'f1.txt']] }, proposeOnly: ['cat0'], categories: [plain([item('delete', 'f0.txt'), item('delete', 'f1.txt')])] },
+    // The same without bisecting.
+    { ...base, bisect: false, rules: { ...base.rules, notAll: [['f0.txt', 'f1.txt']] }, categories: [plain([item('delete', 'f0.txt'), item('delete', 'f1.txt'), item('delete', 'f2.txt')])] },
+    // The verification budget runs out part-way through bisecting.
+    { ...base, maxVerifyRuns: 2, rules: { ...base.rules, must: ['f3.txt'] }, categories: [plain(files.map((f) => item('delete', f))), plain([item('write', 'f0.txt')])] },
+  ];
+}
+
+function buildCategory(spec: CategorySpec, c: number, hooks: string[]) {
+  const items = spec.items.map(({ kind, file, other }, n) => {
+    const i = c * 10 + n;
+    return {
+      id: `${kind}:${file}:${i}`,
+      description: `${kind} ${file}`,
+      ...(kind === 'two' ? { paths: [file, other] } : {}),
+      async apply(ctx: { root: string }) {
+        const abs = path.join(ctx.root, file);
+        if (kind === 'delete') fs.rmSync(abs); // throws when an earlier item already removed it
+        else if (kind === 'write') fs.writeFileSync(abs, 'rewritten\n');
+        else if (kind === 'same') fs.writeFileSync(abs, fs.existsSync(abs) ? fs.readFileSync(abs) : '');
+        else if (kind === 'throw') throw i % 2 ? new Error(`cannot apply ${i}`) : `not an Error ${i}`;
+        else if (kind === 'poison') fs.writeFileSync(path.join(ctx.root, 'poison.txt'), 'x');
+        else for (const f of [file, other]) fs.rmSync(path.join(ctx.root, f), { force: true });
+      },
+    };
+  });
+  return {
+    name: `cat${c}`,
+    title: `Category ${c}`,
+    countsAsDeadCode: spec.countsAsDeadCode,
+    async scan(ctx: { root: string }) {
+      if (spec.behaviour === 'scan-throws') throw new Error('scan exploded');
+      if (spec.behaviour === 'scan-dirties') fs.writeFileSync(path.join(ctx.root, 'scan-leftover.tmp'), 'x');
+      return { items, notes: spec.behaviour === 'notes' ? ['a note', 'another | note'] : [] };
+    },
+    ...(spec.behaviour === 'after-revert' ? { afterRevert: async () => void hooks.push(`reverted cat${c}`) } : {}),
+  };
+}
+
+/** Put the repository in the state the case asks for; returns the directory to run in. */
+function prepare(root: string, work: string, name: string, spec: EngineCase): string {
+  const { setup, files } = spec;
+  if (setup === 'dirty') fs.writeFileSync(path.join(root, files[0]!), 'changed\n');
+  if (setup === 'untracked') for (let i = 0; i < 10; i++) fs.writeFileSync(path.join(root, `new-${i}.txt`), 'x');
+  if (setup === 'baseline') git(root, 'rm', '-q', 'check.cjs'), git(root, 'commit', '-q', '-m', 'break the checks');
+  if (setup === 'branch') git(root, 'branch', `nightly-janitor/${DATE}`);
+  if (setup === 'detached') git(root, 'checkout', '-q', '--detach');
+  if (setup !== 'not-a-repo') return root;
+  const plainDir = path.join(work, `plain-${name}`);
+  fs.mkdirSync(plainDir, { recursive: true });
+  return plainDir;
+}
+
 async function snapEngine(src: string, work: string, snap: Snap): Promise<void> {
   const { runJanitor } = await import(pathToFileURL(path.join(src, 'engine.ts')).href);
   const { DEFAULT_CONFIG } = await import(pathToFileURL(path.join(src, 'config.ts')).href);
   const report = await import(pathToFileURL(path.join(src, 'report.ts')).href);
   const rng = random(17);
-  for (let n = 0; n < 70; n++) {
-    const files = Array.from({ length: 4 + rng.int(6) }, (_, i) => `f${i}.txt`);
-    const rules = {
-      must: rng.sample(files, rng.int(3)),
-      notAll: rng.chance(0.4) ? [rng.sample(files, 2)] : [],
-      poison: rng.chance(0.3) ? ['poison.txt'] : [],
-      litter: rng.chance(0.3),
-    };
-    const initial: Record<string, string> = { 'check.cjs': CHECK, 'rules.json': JSON.stringify(rules), '.gitignore': rng.chance(0.5) ? 'coverage.tmp\n' : '' };
-    for (const f of files) initial[f] = `${f}\n`.repeat(1 + rng.int(4));
-    const root = makeRepo(path.join(work, `engine-${n}`), initial);
+  const cases: [string, EngineCase][] = [
+    ...Array.from({ length: 70 }, (_, n): [string, EngineCase] => [String(n), madeUpCase(rng)]),
+    ...handmadeCases().map((spec, n): [string, EngineCase] => [`handmade-${n}`, spec]),
+  ];
+  for (const [name, spec] of cases) {
+    const initial: Record<string, string> = { 'check.cjs': CHECK, 'rules.json': JSON.stringify(spec.rules), '.gitignore': spec.ignoreLitter ? 'coverage.tmp\n' : '' };
+    for (const [i, f] of spec.files.entries()) initial[f] = `${f}\n`.repeat(1 + (i % 4));
+    const root = makeRepo(path.join(work, `engine-${name}`), initial);
     const hooks: string[] = [];
-
-    const item = (i: number) => {
-      const file = rng.pick(files);
-      const kind = rng.pick(['delete', 'delete', 'delete', 'write', 'same', 'throw', 'poison', 'two']);
-      const other = rng.pick(files);
-      return {
-        id: `${kind}:${file}:${i}`,
-        description: `${kind} ${file}`,
-        ...(kind === 'two' ? { paths: [file, other] } : {}),
-        async apply(ctx: { root: string }) {
-          const abs = path.join(ctx.root, file);
-          if (kind === 'delete') fs.rmSync(abs); // throws when an earlier item already removed it
-          else if (kind === 'write') fs.writeFileSync(abs, 'rewritten\n');
-          else if (kind === 'same') fs.writeFileSync(abs, fs.existsSync(abs) ? fs.readFileSync(abs) : '');
-          else if (kind === 'throw') throw i % 2 ? new Error(`cannot apply ${i}`) : `not an Error ${i}`;
-          else if (kind === 'poison') fs.writeFileSync(path.join(ctx.root, 'poison.txt'), 'x');
-          else for (const f of [file, other]) fs.rmSync(path.join(ctx.root, f), { force: true });
-        },
-      };
-    };
-    const categories = Array.from({ length: 1 + rng.int(3) }, (_, c) => {
-      const behaviour = rng.pick(['plain', 'plain', 'plain', 'scan-throws', 'scan-dirties', 'notes', 'after-revert', 'empty']);
-      const items = behaviour === 'empty' ? [] : Array.from({ length: 1 + rng.int(6) }, (_, i) => item(c * 10 + i));
-      return {
-        name: `cat${c}`,
-        title: `Category ${c}`,
-        countsAsDeadCode: rng.chance(0.6),
-        async scan(ctx: { root: string }) {
-          if (behaviour === 'scan-throws') throw new Error('scan exploded');
-          if (behaviour === 'scan-dirties') fs.writeFileSync(path.join(ctx.root, 'scan-leftover.tmp'), 'x');
-          return { items, notes: behaviour === 'notes' ? ['a note', 'another | note'] : [] };
-        },
-        ...(behaviour === 'after-revert' ? { afterRevert: async () => void hooks.push(`reverted cat${c}`) } : {}),
-      };
-    });
-
-    const setup = rng.pick(['ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'dirty', 'untracked', 'no-verify', 'unverified', 'baseline', 'branch', 'not-a-repo', 'detached']);
-    if (setup === 'dirty') fs.writeFileSync(path.join(root, files[0]!), 'changed\n');
-    if (setup === 'untracked') for (let i = 0; i < 10; i++) fs.writeFileSync(path.join(root, `new-${i}.txt`), 'x');
-    if (setup === 'baseline') git(root, 'rm', '-q', 'check.cjs'), git(root, 'commit', '-q', '-m', 'break the checks');
-    if (setup === 'branch') git(root, 'branch', `nightly-janitor/${DATE}`);
-    if (setup === 'detached') git(root, 'checkout', '-q', '--detach');
-    const target = setup === 'not-a-repo' ? path.join(work, `plain-${n}`) : root;
-    fs.mkdirSync(target, { recursive: true });
-    const config = { ...structuredClone(DEFAULT_CONFIG), bisect: rng.chance(0.8), maxVerifyRuns: rng.pick([200, 200, 200, 3, 1]), branchPrefix: rng.pick(['nightly-janitor', 'nightly-janitor', 'tidy/up']) };
+    const unverified = spec.setup === 'no-verify' || spec.setup === 'unverified';
     const options = {
-      root: target,
-      categories,
-      verify: setup === 'no-verify' || setup === 'unverified' ? [] : rng.chance(0.2) ? ['node check.cjs', 'test -f rules.json'] : ['node check.cjs'],
-      config,
+      root: prepare(root, work, name, spec),
+      categories: spec.categories.map((category, c) => buildCategory(category, c, hooks)),
+      verify: unverified ? [] : spec.twoChecks ? ['node check.cjs', 'test -f rules.json'] : ['node check.cjs'],
+      config: { ...structuredClone(DEFAULT_CONFIG), bisect: spec.bisect, maxVerifyRuns: spec.maxVerifyRuns, branchPrefix: spec.branchPrefix },
       date: DATE,
-      dryRun: rng.chance(0.12),
-      allowUnverified: setup === 'unverified',
-      proposeOnly: rng.chance(0.25) ? ['cat0'] : rng.chance(0.1) ? ['cat1', 'nope'] : undefined,
+      dryRun: spec.dryRun,
+      allowUnverified: spec.setup === 'unverified',
+      proposeOnly: spec.proposeOnly,
       log: (m: string) => void hooks.push(m),
     };
     const result = await attempt(() => runJanitor(options));
     const rendered = 'raised' in result ? null : await attempt(() => [report.renderPrBody(result), report.renderPlan(result), report.computeTotals(result), report.prTitle(result)]);
-    const state = setup === 'not-a-repo' ? null : [
+    const state = spec.setup === 'not-a-repo' ? null : [
       git(root, 'log', '--all', '--format=%H %D%n%B'), git(root, 'status', '--porcelain'), git(root, 'rev-parse', '--abbrev-ref', 'HEAD'), git(root, 'ls-files'),
     ];
-    snap[`engine/${n}`] = scrub(JSON.stringify([setup, result, rendered, state, hooks], plain), work);
+    snap[`engine/${name}`] = scrub(JSON.stringify([spec, result, rendered, state, hooks], plain), work);
   }
 }
 
