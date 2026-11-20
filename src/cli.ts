@@ -3,10 +3,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { selectCategories } from './categories/index.js';
-import { ALL_CATEGORIES, ConfigError, loadConfig } from './config.js';
+import { ALL_CATEGORIES, ConfigError, loadConfig, type JanitorConfig } from './config.js';
 import { JanitorError, runJanitor } from './engine.js';
 import { Git } from './git.js';
 import { computeTotals, formatBytes, prTitle, renderPlan, renderPrBody } from './report.js';
+import type { RunReport } from './types.js';
 import { detectVerifyCommands } from './verify.js';
 
 const VERSION = '0.1.0';
@@ -52,8 +53,8 @@ function writeFile(file: string, content: string): void {
   fs.writeFileSync(file, content);
 }
 
-async function main(): Promise<void> {
-  const { values, positionals } = parseArgs({
+function readArgs() {
+  return parseArgs({
     allowPositionals: true,
     options: {
       repo: { type: 'string' },
@@ -71,16 +72,12 @@ async function main(): Promise<void> {
       version: { type: 'boolean', short: 'v' },
     },
   });
+}
 
-  if (values.version) return void process.stdout.write(`${VERSION}\n`);
-  const command = positionals[0] ?? 'run';
-  if (values.help || command === 'help') return void process.stdout.write(HELP);
-  if (command !== 'run' && command !== 'scan') fail(`unknown command "${command}" (try --help)`, 1);
+type Flags = ReturnType<typeof readArgs>['values'];
 
-  const root = path.resolve(values.repo ?? process.cwd());
-  if (!fs.existsSync(root)) fail(`${root} does not exist`, 2);
-
-  const config = loadConfig(root);
+/** Flags given on the command line override what `.janitor.json` says. */
+function applyFlags(config: JanitorConfig, values: Flags): void {
   if (values.categories) config.categories = values.categories.split(',').map((s) => s.trim()).filter(Boolean);
   if (values['no-bisect']) config.bisect = false;
   if (values['delete-files']) config.deadFiles = 'apply';
@@ -91,6 +88,56 @@ async function main(): Promise<void> {
     if (!Number.isFinite(n) || n <= 0) fail(`--${flag} must be a positive number`, 1);
     config[key] = n;
   }
+}
+
+function writeGithubOutputs(file: string, report: RunReport, prBodyFile: string, reportFile: string): void {
+  fs.appendFileSync(
+    file,
+    [
+      `changed=${report.changed}`,
+      `branch=${report.branch}`,
+      `base-sha=${report.baseSha}`,
+      `head-sha=${report.headSha}`,
+      `pr-title=${prTitle(report)}`,
+      `pr-body-file=${prBodyFile}`,
+      `report-file=${reportFile}`,
+      '',
+    ].join('\n'),
+  );
+}
+
+/** What a person running janitor by hand reads at the end. */
+function closingMessage(report: RunReport, prBodyFile: string, reportFile: string): string {
+  const totals = computeTotals(report);
+  if (report.changed) {
+    return [
+      '',
+      `Branch ${report.branch}: ${totals.commits} verified commit(s), ${totals.itemsKept} change(s) kept, ${totals.itemsReverted} reverted.`,
+      `Dead code removed: ${formatBytes(totals.deadCodeBytes)}, ${totals.deadCodeLines} line(s).`,
+      ...(totals.itemsProposed ? [`${totals.itemsProposed} dead file(s) pass your checks when removed; proposed in the PR description, not deleted.`] : []),
+      `PR description: ${prBodyFile}`,
+      '',
+    ].join('\n');
+  }
+  return (
+    `\nNothing was changed${totals.itemsReverted ? ` (${totals.itemsReverted} candidate(s) reverted)` : ''}. No branch was left behind.\n` +
+    (totals.itemsProposed ? `${totals.itemsProposed} dead file(s) pass your checks when removed and are proposed in ${prBodyFile}\n` : '') +
+    `Report: ${reportFile}\n`
+  );
+}
+
+async function main(): Promise<void> {
+  const { values, positionals } = readArgs();
+  if (values.version) return void process.stdout.write(`${VERSION}\n`);
+  const command = positionals[0] ?? 'run';
+  if (values.help || command === 'help') return void process.stdout.write(HELP);
+  if (command !== 'run' && command !== 'scan') fail(`unknown command "${command}" (try --help)`, 1);
+
+  const root = path.resolve(values.repo ?? process.cwd());
+  if (!fs.existsSync(root)) fail(`${root} does not exist`, 2);
+
+  const config = loadConfig(root);
+  applyFlags(config, values);
   if (values.date && !/^\d{4}-\d{2}-\d{2}$/.test(values.date)) fail('--date must be YYYY-MM-DD', 1);
 
   const verify = (values.verify?.length ? values.verify : config.verify) ?? detectVerifyCommands(root);
@@ -115,46 +162,10 @@ async function main(): Promise<void> {
   const outDir = path.join(await new Git(root).gitDir(), 'janitor');
   const prBodyFile = path.resolve(values['pr-body'] ?? path.join(outDir, 'pr-body.md'));
   const reportFile = path.resolve(values['report-json'] ?? path.join(outDir, 'report.json'));
-  const totals = computeTotals(report);
   writeFile(prBodyFile, renderPrBody(report));
-  writeFile(reportFile, `${JSON.stringify({ ...report, totals }, null, 2)}\n`);
-
-  if (process.env.GITHUB_OUTPUT) {
-    fs.appendFileSync(
-      process.env.GITHUB_OUTPUT,
-      [
-        `changed=${report.changed}`,
-        `branch=${report.branch}`,
-        `base-sha=${report.baseSha}`,
-        `head-sha=${report.headSha}`,
-        `pr-title=${prTitle(report)}`,
-        `pr-body-file=${prBodyFile}`,
-        `report-file=${reportFile}`,
-        '',
-      ].join('\n'),
-    );
-  }
-
-  if (report.changed) {
-    process.stdout.write(
-      [
-        '',
-        `Branch ${report.branch}: ${totals.commits} verified commit(s), ${totals.itemsKept} change(s) kept, ${totals.itemsReverted} reverted.`,
-        `Dead code removed: ${formatBytes(totals.deadCodeBytes)}, ${totals.deadCodeLines} line(s).`,
-        ...(totals.itemsProposed ? [`${totals.itemsProposed} dead file(s) pass your checks when removed; proposed in the PR description, not deleted.`] : []),
-        `PR description: ${prBodyFile}`,
-        '',
-      ].join('\n'),
-    );
-  } else {
-    process.stdout.write(
-      `\nNothing was changed${totals.itemsReverted ? ` (${totals.itemsReverted} candidate(s) reverted)` : ''}. No branch was left behind.\n` +
-        (totals.itemsProposed
-          ? `${totals.itemsProposed} dead file(s) pass your checks when removed and are proposed in ${prBodyFile}\n`
-          : '') +
-        `Report: ${reportFile}\n`,
-    );
-  }
+  writeFile(reportFile, `${JSON.stringify({ ...report, totals: computeTotals(report) }, null, 2)}\n`);
+  if (process.env.GITHUB_OUTPUT) writeGithubOutputs(process.env.GITHUB_OUTPUT, report, prBodyFile, reportFile);
+  process.stdout.write(closingMessage(report, prBodyFile, reportFile));
 }
 
 main().catch((err: unknown) => {
