@@ -114,6 +114,35 @@ function findSeparatePackages(root: string, tracked: string[]): string[] {
   return hasWorkspaces ? [] : nested.sort();
 }
 
+/**
+ * What the project's text says about its files and names. Source files count
+ * only when they are reachable; identifiers are counted per source file only
+ * when imports are injected automatically (`countIdentifiers`).
+ */
+function collectMentions(root: string, tracked: string[], reachable: Set<string>, countIdentifiers: boolean): Mentions {
+  const mentions: Mentions = { basenames: new Set(), pairs: new Set(), identifiers: new Set(), sourceFileCounts: new Map() };
+  for (const file of tracked) {
+    if (isLockfile(file) || /\.(?:map|snap|svg|lock)$/i.test(file)) continue;
+    const text = readText(root, file);
+    if (!text) continue;
+    if (!isSource(file)) {
+      addPathTokens(text, mentions);
+      // Prose and package.json can name a file (`node scripts/x.mjs`) but never "use" an export.
+      if (path.posix.basename(file) !== 'package.json' && !/\.md$/i.test(file)) {
+        for (const id of text.match(IDENTIFIER) ?? []) mentions.identifiers.add(id);
+      }
+      continue;
+    }
+    if (countIdentifiers) {
+      for (const id of new Set(text.match(IDENTIFIER) ?? [])) {
+        mentions.sourceFileCounts.set(id, (mentions.sourceFileCounts.get(id) ?? 0) + 1);
+      }
+    }
+    if (reachable.has(file)) addPathTokens(text, mentions);
+  }
+  return mentions;
+}
+
 export async function analyzeProject(ctx: JanitorContext): Promise<ProjectAnalysis> {
   const tracked = await trackedFiles(ctx);
   const sources = tracked.filter((f) => isSource(f) && !f.includes('node_modules/'));
@@ -124,28 +153,7 @@ export async function analyzeProject(ctx: JanitorContext): Promise<ProjectAnalys
   const importedByComponents = graph.components.flatMap((c) => [...c.edges.keys()]);
   const reachable = reachableFrom(graph, [...entryPoints.entries, ...importedByComponents]);
 
-  const mentions: Mentions = { basenames: new Set(), pairs: new Set(), identifiers: new Set(), sourceFileCounts: new Map() };
-  for (const file of tracked) {
-    if (isLockfile(file) || /\.(?:map|snap|svg|lock)$/i.test(file)) continue;
-    if (isSource(file)) {
-      const text = readText(ctx.root, file);
-      if (!text) continue;
-      if (entryPoints.autoImports) {
-        for (const id of new Set(text.match(IDENTIFIER) ?? [])) {
-          mentions.sourceFileCounts.set(id, (mentions.sourceFileCounts.get(id) ?? 0) + 1);
-        }
-      }
-      if (reachable.has(file)) addPathTokens(text, mentions);
-    } else {
-      const text = readText(ctx.root, file);
-      if (!text) continue;
-      addPathTokens(text, mentions);
-      // Prose and package.json can name a file (`node scripts/x.mjs`) but never "use" an export.
-      if (path.posix.basename(file) !== 'package.json' && !/\.md$/i.test(file)) {
-        for (const id of text.match(IDENTIFIER) ?? []) mentions.identifiers.add(id);
-      }
-    }
-  }
+  const mentions = collectMentions(ctx.root, tracked, reachable, entryPoints.autoImports);
 
   const separatePackages = findSeparatePackages(ctx.root, tracked);
   const matchesIgnore = makeMatcher([...DEFAULT_IGNORE, ...ctx.config.ignore]);
