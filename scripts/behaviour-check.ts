@@ -219,6 +219,11 @@ const SHAPES: Record<string, string> = {
   'src/index.ts': "import def, { a as renamed, type T } from './named';\nimport * as ns from './ns';\nimport './side-effect';\nexport * from './reexported';\nexport { x as y } from './picked';\nimport legacy = require('./legacy');\nexport const used = [def, renamed, ns, legacy];\nexport type U = T;\n",
   'src/named.ts': 'export default 1;\nexport const a = 1;\nexport type T = string;\nexport const unusedConst = { a: 1, b: [2, -3], c: () => 4 };\nexport let sideEffect = compute();\nexport function unusedFn() {}\nexport class Plain { static n = 1; m() {} }\nexport class Impure { static n = compute(); }\nexport enum E { A }\nexport interface Merged { a: 1 }\nexport namespace Merged { export const b = 2; }\nexport const [d1, d2] = [1, 2];\nfunction compute() { return 1; }\n',
   'src/ns.ts': 'export const one = 1;\nexport const two = 2;\n',
+  // Committed with the fixed date the check uses, so every flag here is months old.
+  'flags.json': JSON.stringify({ $schema: 'x', version: 2, 'never-used': true, 'on-for-good': { enabled: true }, 'full-rollout': { rollout: 100 },
+    'half-rollout': { percentage: 50 }, 'switched-off': { on: false, rollout: 100 }, 'plain-on': true, 'camelCased-flag': true, '_private': true }, null, 2) + '\n',
+  'src/flags.ts': "export const flags = ['on-for-good', 'full-rollout', 'half-rollout', 'switched-off', isOn('plain-on'), camelCasedFlag, CAMEL_CASED_FLAG];\n",
+  'docs/flags.md': 'never-used is documented here only\n',
   'src/side-effect.ts': 'console.log(1);\n',
   'src/reexported.ts': 'export const r = 1;\n',
   'src/picked.ts': 'export const x = 1;\nexport const notPicked = 2;\n',
