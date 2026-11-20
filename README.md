@@ -438,6 +438,16 @@ npm test          # 67 tests; the engine suite drives real temporary git reposit
 npm run build
 ```
 
+### Checking a refactor
+
+"No behaviour change" should be a measurement. `scripts/behaviour-check.ts` runs the code from a git ref and the code in the working tree over the same inputs and compares everything they produce:
+
+```bash
+node --import tsx scripts/behaviour-check.ts <base-ref> <js-or-ts-checkout> [<checkout> ...] [--only project,edits,paths,config,engine,cli]
+```
+
+It compares the module graph, entry points and every scanning category on each checkout you give it (and on a made-up project that contains every framework convention and every way of loading a directory), `removeExport()` and `tidyImports()` on their source files, the safe-apply loop on 76 small repositories with made-up categories (same commits, same hashes), and the command line. A clean result is evidence, not proof: the script's header lists what it does not cover.
+
 ## License
 
 MIT
