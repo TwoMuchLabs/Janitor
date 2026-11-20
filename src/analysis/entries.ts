@@ -189,6 +189,68 @@ export interface EntryPoints {
   autoImports: boolean;
 }
 
+/** A tracked package.json, parsed; null when it is unreadable, not JSON, or inside node_modules. */
+function readPackage(root: string, file: string): Record<string, unknown> | null {
+  if (path.posix.basename(file) !== 'package.json' || file.includes('node_modules/')) return null;
+  const text = readText(root, file);
+  if (!text) return null;
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+/** Every file path a package.json points at: its entry fields, and scripts that name a source file. */
+function declaredPaths(pkg: Record<string, unknown>): string[] {
+  const declared: string[] = [];
+  for (const key of ['main', 'module', 'types', 'typings', 'browser', 'bin', 'exports', 'source']) {
+    collectStrings(pkg[key], declared);
+  }
+  const scripts: string[] = [];
+  collectStrings(pkg.scripts, scripts);
+  for (const script of scripts) declared.push(...(script.match(SCRIPT_PATH) ?? []));
+  return declared;
+}
+
+function dependencyNames(pkg: Record<string, unknown>): Set<string> {
+  const deps = new Set<string>();
+  for (const key of ['dependencies', 'devDependencies', 'peerDependencies']) {
+    if (pkg[key] && typeof pkg[key] === 'object') for (const name of Object.keys(pkg[key] as object)) deps.add(name);
+  }
+  return deps;
+}
+
+/** Files a framework among `deps` finds on disk, for the package whose files start with `prefix`. */
+function frameworkRoots(deps: Set<string>, prefix: string, sources: string[]): string[] {
+  const roots: string[] = [];
+  for (const framework of FRAMEWORK_ROOTS) {
+    if (!framework.deps.some((d) => deps.has(d))) continue;
+    const matches = makeMatcher(framework.globs);
+    for (const f of sources) if (f.startsWith(prefix) && matches(f.slice(prefix.length))) roots.push(f);
+  }
+  return roots;
+}
+
+/** Source files an HTML page loads: <script type="module" src="/src/main.tsx">. */
+function scriptsLoadedBy(root: string, html: string, sources: Set<string>): string[] {
+  if (!/\.html?$/i.test(html) || html.includes('node_modules/')) return [];
+  const text = readText(root, html);
+  if (!text) return [];
+  const dir = path.posix.dirname(html);
+  const loaded: string[] = [];
+  for (const match of text.matchAll(HTML_SCRIPT)) {
+    const src = match[1]!;
+    if (/^(?:[a-z]+:)?\/\//i.test(src)) continue;
+    const relative = src.replace(/^\/+/, '');
+    for (const base of src.startsWith('/') ? [dir, '.'] : [dir]) {
+      const candidate = path.posix.normalize(path.posix.join(base, relative));
+      if (sources.has(candidate)) loaded.push(candidate);
+    }
+  }
+  return loaded;
+}
+
 export function findEntryPoints(root: string, tracked: string[], sources: string[], userGlobs: string[]): EntryPoints {
   const sourceSet = new Set(sources);
   const entries = new Set<string>();
@@ -201,55 +263,18 @@ export function findEntryPoints(root: string, tracked: string[], sources: string
   };
 
   for (const pkgFile of tracked) {
-    if (path.posix.basename(pkgFile) !== 'package.json' || pkgFile.includes('node_modules/')) continue;
-    const text = readText(root, pkgFile);
-    if (!text) continue;
-    let pkg: Record<string, unknown>;
-    try {
-      pkg = JSON.parse(text) as Record<string, unknown>;
-    } catch {
-      continue;
-    }
-    const declared: string[] = [];
-    for (const key of ['main', 'module', 'types', 'typings', 'browser', 'bin', 'exports', 'source']) {
-      collectStrings(pkg[key], declared);
-    }
-    const scripts: string[] = [];
-    collectStrings(pkg.scripts, scripts);
-    for (const script of scripts) declared.push(...(script.match(SCRIPT_PATH) ?? []));
-
+    const pkg = readPackage(root, pkgFile);
+    if (!pkg) continue;
     const pkgDir = path.posix.dirname(pkgFile);
-    for (const d of declared) for (const f of mapToSources(d, pkgDir, sourceSet)) addRoot(f);
+    for (const d of declaredPaths(pkg)) for (const f of mapToSources(d, pkgDir, sourceSet)) addRoot(f);
 
-    const deps = new Set<string>();
-    for (const key of ['dependencies', 'devDependencies', 'peerDependencies']) {
-      if (pkg[key] && typeof pkg[key] === 'object') for (const name of Object.keys(pkg[key] as object)) deps.add(name);
-    }
+    const deps = dependencyNames(pkg);
     if (AUTO_IMPORT_DEPS.some((d) => deps.has(d))) autoImports = true;
-    const prefix = pkgDir === '.' ? '' : `${pkgDir}/`;
-    for (const framework of FRAMEWORK_ROOTS) {
-      if (!framework.deps.some((d) => deps.has(d))) continue;
-      const matches = makeMatcher(framework.globs);
-      for (const f of sources) if (f.startsWith(prefix) && matches(f.slice(prefix.length))) addRoot(f);
-    }
+    frameworkRoots(deps, pkgDir === '.' ? '' : `${pkgDir}/`, sources).forEach(addRoot);
   }
 
-  // A page that loads a script is an entry point for it: <script type="module" src="/src/main.tsx">.
-  for (const html of tracked) {
-    if (!/\.html?$/i.test(html) || html.includes('node_modules/')) continue;
-    const text = readText(root, html);
-    if (!text) continue;
-    const dir = path.posix.dirname(html);
-    for (const match of text.matchAll(HTML_SCRIPT)) {
-      const src = match[1]!;
-      if (/^(?:[a-z]+:)?\/\//i.test(src)) continue;
-      const relative = src.replace(/^\/+/, '');
-      for (const base of src.startsWith('/') ? [dir, '.'] : [dir]) {
-        const candidate = path.posix.normalize(path.posix.join(base, relative));
-        if (sourceSet.has(candidate)) addRoot(candidate);
-      }
-    }
-  }
+  // A page that loads a script is an entry point for it.
+  for (const html of tracked) scriptsLoadedBy(root, html, sourceSet).forEach(addRoot);
 
   const isUser = makeMatcher(userGlobs);
   const isRootConvention = makeMatcher(ROOT_CONVENTION_GLOBS);
