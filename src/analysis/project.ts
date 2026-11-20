@@ -53,6 +53,24 @@ function addPathTokens(text: string, mentions: Mentions): void {
   }
 }
 
+const VARIANT_SUFFIX =
+  /[-._](?:browser|node|native|web|ios|android|windows|macos|worker|server|client|deno|bun|edge|electron|react-native|rn|esm|cjs|legacy|modern|dev|prod|development|production)$/;
+
+/**
+ * Is `file` a platform or build variant of a sibling (`md5-browser.ts` next to
+ * `md5.ts`, `Button.ios.tsx` next to `Button.tsx`)? Such files are swapped in
+ * by bundlers and build scripts by naming convention, never by import, and a
+ * test suite running on one platform will not notice another's variant missing.
+ */
+export function isVariantOfSibling(file: string, sources: Set<string>): boolean {
+  const dir = path.posix.dirname(file);
+  const stem = stripSourceExt(path.posix.basename(file));
+  const base = stem.replace(VARIANT_SUFFIX, '');
+  if (base === stem || !base) return false;
+  const prefix = dir === '.' ? '' : `${dir}/`;
+  return ['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs'].some((ext) => sources.has(prefix + base + ext));
+}
+
 /** True when something outside the import graph appears to refer to `file`. */
 export function isMentioned(file: string, mentions: Mentions): boolean {
   const base = path.posix.basename(file);

@@ -136,6 +136,14 @@ It is deliberately biased towards leaving things alone:
   by hand (`node tools/report.mjs`). It is listed in the PR, never deleted.
 - A nested folder with its own `package.json` that is not a workspace of the root is a
   separate project your checks do not cover. Nothing inside it is touched.
+- A platform or build variant of a sibling file (`md5-browser.ts` beside `md5.ts`,
+  `Button.ios.tsx` beside `Button.tsx`) is kept: build scripts and bundlers swap these in
+  by name, and tests on one platform do not notice another's variant missing.
+- A wildcard in package.json `exports` (`"./unsafe/*": "./lib/*"`) publishes every file
+  beneath it, so all of them are treated as public API.
+- Files at the top of the repository and tool files loaded by convention (`gulpfile.js`,
+  `karma.conf.js`, `jest.setup.ts`) are never candidates.
+- With no entry point at all, neither files nor exports are removed.
 - Entry-point exports are public API and are never touched. Default exports are never touched.
 - Major updates, and 0.x minor updates, are never applied; they are listed in the PR.
 
@@ -307,7 +315,7 @@ export const removeTodoFiles: Category = {
 ```bash
 npm ci
 npm run typecheck
-npm test          # 44 tests; the engine suite drives real temporary git repositories
+npm test          # 49 tests; the engine suite drives real temporary git repositories
 npm run build
 ```
 

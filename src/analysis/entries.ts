@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { SOURCE_EXTS, readText, stripSourceExt } from '../util/files.js';
-import { globToRegExp, makeMatcher } from '../util/glob.js';
+import { makeMatcher } from '../util/glob.js';
 
 /**
  * Files that are used by convention rather than by import: tests, tool
@@ -21,6 +21,14 @@ const CONVENTION_ENTRY_GLOBS = [
   '**/*.stories.*',
   // tooling and configuration
   '**/*.config.*',
+  '**/*.conf.*',
+  '**/*.setup.*',
+  '**/*.workspace.*',
+  '**/{gulpfile,Gruntfile,Jakefile,webpack,rollup}.*',
+  '**/{setupTests,setup-tests,service-worker,sw}.*',
+  // Anything at the top of the repository is far more often tool configuration
+  // or a script (gulpfile.js, server.js) than a forgotten module.
+  '*',
   '**/.*',
   '**/.*/**',
   '**/scripts/**',
@@ -73,20 +81,39 @@ export function mapToSources(declared: string, pkgDir: string, sources: Set<stri
   if (segments.length > 1 && OUTPUT_DIRS.has(segments[0]!)) {
     const rest = segments.slice(1).join('/');
     stems.add(`${prefix}src/${rest}`);
-    stems.add(`${prefix}${rest}`);
+    // Dropping the output directory from a wildcard path would match the whole package.
+    if (!rest.startsWith('*')) stems.add(`${prefix}${rest}`);
   }
 
   const found = new Set<string>();
-  for (const s of stems) {
-    if (s.includes('*')) {
-      const re = globToRegExp(`${s}.*`);
-      for (const f of sources) if (re.test(f)) found.add(f);
-      continue;
-    }
+  const lookup = (s: string) => {
     for (const ext of SOURCE_EXTS) {
       if (sources.has(s + ext)) found.add(s + ext);
       if (sources.has(`${s}/index${ext}`)) found.add(`${s}/index${ext}`);
     }
+  };
+  for (const s of stems) {
+    if (s.includes('*')) {
+      // In package.json `exports`, `*` matches across directories: "./unsafe/*": "./lib/*"
+      // publishes every file under lib/, however deep.
+      const re = new RegExp(`^${s.replace(/[.+^$()|[\]\\{}?]/g, '\\$&').replace(/\*/g, '.*')}(?:\\.[^/]*)?$`);
+      for (const f of sources) if (re.test(f)) found.add(f);
+      continue;
+    }
+    lookup(s);
+  }
+
+  // Build output under a directory name we do not know (`distribution/index.js`
+  // built from `source/index.ts`): accept the same path under any sibling directory.
+  if (found.size === 0 && segments.length > 1 && !stem.includes('*')) {
+    const rest = segments.slice(1).join('/');
+    const firstDirs = new Set<string>();
+    for (const f of sources) {
+      if (!f.startsWith(prefix)) continue;
+      const first = f.slice(prefix.length).split('/')[0]!;
+      if (first !== segments[0]) firstDirs.add(first);
+    }
+    for (const dir of firstDirs) lookup(`${prefix}${dir}/${rest}`);
   }
   return [...found];
 }

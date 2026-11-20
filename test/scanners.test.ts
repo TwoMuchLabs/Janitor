@@ -226,3 +226,64 @@ test('nested packages that are not workspaces are left alone', async () => {
   assert.deepEqual(ids((await deadFiles.scan(workspace)).items), ['dead-file:sites/promo/src/forgotten.js', 'dead-file:src/old.ts']);
   assert.deepEqual(ids((await unusedExports.scan(workspace)).items), ['unused-export:sites/promo/src/lib.js#unusedThere']);
 });
+
+test('entry points are found when the build output directory has an unfamiliar name', () => {
+  const sources = new Set(['source/index.ts', 'source/core/Ky.ts', 'test/main.ts']);
+  assert.deepEqual(mapToSources('./distribution/index.js', '.', sources), ['source/index.ts']);
+  assert.deepEqual(mapToSources('./distribution/core/Ky.d.ts', '.', sources), ['source/core/Ky.ts']);
+  assert.deepEqual(mapToSources('./distribution/missing.js', '.', sources), []);
+});
+
+test('unused-exports: does nothing when the project has no known entry point', async () => {
+  const root = makeRepo({ 'lib/a.ts': `export const a = 1;\n`, 'lib/b.ts': `import './a';\nexport const b = 1;\n` });
+  const { items, notes } = await unusedExports.scan(context(root));
+  assert.equal(items.length, 0);
+  assert.match(notes[0]!, /No entry points/);
+});
+
+test('dead-files: keeps platform variants that a build swaps in by name', async () => {
+  const root = makeRepo({
+    'package.json': pkg(),
+    'src/index.ts': `import { md5 } from './md5.js';\nimport { Button } from './Button';\nconsole.log(md5, Button);\n`,
+    'src/md5.ts': `export const md5 = 'node';\n`,
+    'src/md5-browser.ts': `export const md5 = 'browser';\n`,
+    'src/Button.tsx': `export const Button = 1;\n`,
+    'src/Button.ios.tsx': `export const Button = 2;\n`,
+    'src/Button.android.tsx': `export const Button = 3;\n`,
+    // a variant-looking name with no sibling is just a forgotten file
+    'src/polyfill-legacy.ts': `export const p = 1;\n`,
+    // "-old" is not a platform
+    'src/md5-old.ts': `export const md5 = 'old';\n`,
+  });
+  const { items, notes } = await deadFiles.scan(context(root));
+  assert.deepEqual(ids(items), ['dead-file:src/md5-old.ts', 'dead-file:src/polyfill-legacy.ts']);
+  assert.match(notes.join('\n'), /3 unreachable file\(s\) were kept.*`src\/md5-browser\.ts`/);
+});
+
+test('a wildcard in package.json exports publishes every file beneath it', async () => {
+  const sources = new Set(['lib/axios.js', 'lib/helpers/deprecated.js', 'lib/core/deep/x.js', 'other/y.js']);
+  assert.deepEqual(mapToSources('./lib/*', '.', sources).sort(), ['lib/axios.js', 'lib/core/deep/x.js', 'lib/helpers/deprecated.js']);
+  assert.deepEqual(mapToSources('./lib/*.js', '.', sources).sort(), ['lib/axios.js', 'lib/core/deep/x.js', 'lib/helpers/deprecated.js']);
+
+  const root = makeRepo({
+    'package.json': JSON.stringify({ name: 'lib', exports: { '.': './index.js', './unsafe/*': './lib/*' } }),
+    'index.js': `export { a } from './lib/a.js';\n`,
+    'lib/a.js': `export const a = 1;\nexport const onlyForDeepImporters = 2;\n`,
+    'lib/helpers/unimported.js': `export default function helper() {}\n`,
+  });
+  assert.deepEqual((await deadFiles.scan(context(root))).items, []);
+  assert.deepEqual((await unusedExports.scan(context(root))).items, []);
+});
+
+test('dead-files: tool files loaded by convention are never candidates', async () => {
+  const root = makeRepo({
+    'package.json': pkg({ scripts: { build: 'gulp clear && rollup -c' } }),
+    'src/index.ts': `console.log(1);\n`,
+    'gulpfile.js': `export const clear = () => {};\n`,
+    'tasks.js': `export const t = 1;\n`,
+    'tools/karma.conf.js': `export default {};\n`,
+    'src/jest.setup.ts': `export const s = 1;\n`,
+    'src/forgotten.ts': `export const f = 1;\n`,
+  });
+  assert.deepEqual(ids((await deadFiles.scan(context(root))).items), ['dead-file:src/forgotten.ts']);
+});

@@ -126,6 +126,13 @@ export const unusedExports: Category = {
 
   async scan(ctx) {
     const project = await analyzeProject(ctx);
+    if (project.entryPoints.roots === 0) {
+      // Without knowing the entry points, every export might be public API.
+      return {
+        items: [],
+        notes: ['No entry points were found, so exports could not be told apart from public API and none were removed. Add `entry` globs to `.janitor.json`.'],
+      };
+    }
     const used = new Map<string, Set<string>>();
     for (const mod of project.graph.modules.values()) {
       for (const [target, names] of mod.edges) {

@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { reachableFrom } from '../analysis/module-graph.js';
-import { analyzeProject, isMentioned } from '../analysis/project.js';
+import { analyzeProject, isMentioned, isVariantOfSibling } from '../analysis/project.js';
 import type { Category, CleanupItem } from '../types.js';
 
 /**
@@ -33,6 +33,7 @@ export const deadFiles: Category = {
 
     // Unreachable files we will not touch are still alive for the purposes of
     // the graph: whatever they import has to stay too.
+    const sourceSet = new Set(project.sources);
     const heldBack: string[] = [];
     const scripts: string[] = [];
     for (const file of project.sources) {
@@ -40,7 +41,8 @@ export const deadFiles: Category = {
       if (
         project.isIgnored(file) ||
         project.graph.dynamicPrefixes.some((prefix) => file.startsWith(prefix)) ||
-        isMentioned(file, project.mentions)
+        isMentioned(file, project.mentions) ||
+        isVariantOfSibling(file, sourceSet)
       ) {
         heldBack.push(file);
       } else if (!project.graph.modules.get(file)?.exportsAnything) {
@@ -108,8 +110,10 @@ export const deadFiles: Category = {
       );
     }
     if (heldBack.length > 0) {
+      const shown = heldBack.slice(0, 8).map((f) => `\`${f}\``).join(', ');
+      const more = heldBack.length > 8 ? ` and ${heldBack.length - 8} more` : '';
       notes.push(
-        `${heldBack.length} unreachable file(s) were kept because they are ignored, sit under a dynamically imported directory, or are mentioned by name in a non-code file or the docs.`,
+        `${heldBack.length} unreachable file(s) were kept because they are ignored, sit under a dynamically imported directory, are a platform variant of a sibling file (\`x-browser.ts\` beside \`x.ts\`), or are mentioned by name in a non-code file or the docs: ${shown}${more}.`,
       );
     }
     return { items, notes };
