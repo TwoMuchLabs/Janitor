@@ -133,16 +133,6 @@ function globBase(pattern: string): string {
 const JSDOC_IMPORT = /import\(\s*['"]([^'"]+)['"]\s*\)/g;
 const COMMONJS_EXPORT = /\bmodule\.exports\b|\bexports\s*(?:\.[A-Za-z_$]|\[)/;
 
-/**
- * Build the import graph for `files` (repo-relative source files) using the
- * TypeScript compiler's own module resolution, so tsconfig `paths`, `.js` ->
- * `.ts` mapping and index files behave exactly as they do in the project.
- *
- * The graph deliberately over-approximates usage: any string literal that
- * looks like a relative path and resolves to a source file counts as a
- * namespace import of it (covers `jest.mock('./x')`, `new Worker('./x.js')`,
- * `new URL('./x.js', import.meta.url)` and friends).
- */
 const SCRIPT_BLOCK = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
 const ASTRO_FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---/;
 
@@ -156,6 +146,187 @@ function componentScript(file: string, text: string): string {
   return blocks.join('\n;\n');
 }
 
+/** What a static `import` brings in: `default`, ALL for a namespace, or the imported names. */
+function importedNames(clause: ts.ImportClause | undefined): string[] {
+  const names: string[] = [];
+  if (clause?.name) names.push('default');
+  const bindings = clause?.namedBindings;
+  if (bindings) {
+    if (ts.isNamespaceImport(bindings)) names.push(ALL);
+    else for (const el of bindings.elements) names.push((el.propertyName ?? el.name).text);
+  }
+  return names;
+}
+
+interface Dependency {
+  spec: string;
+  /** May contain ALL. */
+  names: string[];
+}
+
+/** The module a top-level statement loads and what it takes from it: `import`, `export ... from`, `import x = require()`. */
+function staticDependency(stmt: ts.Statement): Dependency | null {
+  if (ts.isImportDeclaration(stmt) && ts.isStringLiteral(stmt.moduleSpecifier)) {
+    return { spec: stmt.moduleSpecifier.text, names: importedNames(stmt.importClause) };
+  }
+  if (ts.isExportDeclaration(stmt) && stmt.moduleSpecifier && ts.isStringLiteral(stmt.moduleSpecifier)) {
+    const clause = stmt.exportClause;
+    const names = clause && ts.isNamedExports(clause) ? clause.elements.map((el) => (el.propertyName ?? el.name).text) : [ALL];
+    return { spec: stmt.moduleSpecifier.text, names };
+  }
+  if (
+    ts.isImportEqualsDeclaration(stmt) &&
+    ts.isExternalModuleReference(stmt.moduleReference) &&
+    ts.isStringLiteralLike(stmt.moduleReference.expression)
+  ) {
+    return { spec: stmt.moduleReference.expression.text, names: [ALL] };
+  }
+  return null;
+}
+
+/** Is this string the module name of a static `import` or `export ... from`? Those are read as statements. */
+function isStaticSpecifier(n: ts.StringLiteralLike): boolean {
+  return (ts.isImportDeclaration(n.parent) || ts.isExportDeclaration(n.parent)) && n.parent.moduleSpecifier === n;
+}
+
+/** Directories a call loads wholesale, relative to the calling file. */
+function loadedDirectories(call: ts.CallExpression): string[] {
+  const callee = call.expression;
+  const name = calleeName(callee);
+  if (isImportMetaGlob(callee)) {
+    // import.meta.glob('./modules/*.ts'): every match is loaded, none is imported by name.
+    return stringLiterals(call.arguments[0]!).filter((pattern) => !pattern.startsWith('!')).map((pattern) => globBase(pattern) || '.');
+  }
+  if (name === 'context' && ts.isPropertyAccessExpression(callee) && calleeName(callee.expression) === 'require') {
+    const first = call.arguments[0]!;
+    return [ts.isStringLiteralLike(first) ? first.text : '.'];
+  }
+  // requireDirectory(__dirname), fs.readdirSync(path.join(__dirname, 'tasks')), glob('./jobs/*.js')
+  if (!name || PATH_HELPER.test(name)) return [];
+  if (!call.arguments.some(isOwnDirectory) && !DIRECTORY_LOADER.test(name)) return [];
+  const literals = call.arguments
+    .flatMap((arg) => stringLiterals(arg))
+    .map((text) => (/[*{[?]/.test(text) ? globBase(text) || '.' : text));
+  const explicit = literals.filter((text) => /^\.{0,2}\//.test(text));
+  // Bare words are only directory names when joined onto something
+  // (`path.join(__dirname, 'tasks')`); they never replace the default.
+  const words = literals.filter((text) => /^[\w@-][\w@/-]*$/.test(text));
+  return [...(explicit.length === 0 ? ['.'] : []), ...explicit, ...words];
+}
+
+/** `import(x)`, `require(x)` or `require.resolve(x)` and the like. */
+function isModuleLoader(callee: ts.Expression): boolean {
+  return (
+    callee.kind === ts.SyntaxKind.ImportKeyword ||
+    (ts.isIdentifier(callee) && callee.text === 'require') ||
+    (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression) && callee.expression.text === 'require')
+  );
+}
+
+type LoaderTarget = { spec: string } | { dir: string };
+
+/** What a module loader can reach: the module it names, or a directory when its argument is computed. */
+function loaderTarget(arg: ts.Expression): LoaderTarget {
+  if (ts.isStringLiteralLike(arg)) return { spec: arg.text };
+  if (ts.isTemplateExpression(arg) && /^\.\.?\//.test(arg.head.text)) {
+    // import(`./locales/${lang}.js`): everything under ./locales may be loaded.
+    const head = arg.head.text;
+    return { dir: head.endsWith('/') ? head : path.posix.dirname(head) };
+  }
+  // Fully dynamic: assume it can reach anything next to this file.
+  return { dir: '.' };
+}
+
+/** The repo-relative prefix for a directory named from a file in `dir`, or null when it lies outside the repository. */
+function protectedPrefix(dir: string, relativeDir: string): string | null {
+  // A leading slash is relative to the project root (Vite's `/src/pages/*`).
+  const joined = relativeDir.startsWith('/')
+    ? path.posix.normalize(relativeDir.replace(/^\/+/, '') || '.')
+    : path.posix.normalize(path.posix.join(dir, relativeDir));
+  if (joined.startsWith('..')) return null;
+  return joined === '.' ? '' : joined.replace(/\/?$/, '/');
+}
+
+interface DynamicLoads {
+  /** Module names: path-like strings, and the arguments of `import()` / `require()`. */
+  specs: string[];
+  /** Directories loaded wholesale, relative to the file. */
+  directories: string[];
+}
+
+/** Everything a file may load other than through its import statements, in source order. */
+function dynamicLoads(root: ts.Node): DynamicLoads {
+  const loads: DynamicLoads = { specs: [], directories: [] };
+  const visit = (n: ts.Node) => {
+    if (ts.isStringLiteralLike(n)) {
+      if (!isStaticSpecifier(n) && /^\.\.?(\/|$)/.test(n.text)) loads.specs.push(n.text);
+    } else if (ts.isCallExpression(n) && n.arguments.length > 0) {
+      loads.directories.push(...loadedDirectories(n));
+      if (isModuleLoader(n.expression)) {
+        const target = loaderTarget(n.arguments[0]!);
+        if ('spec' in target) loads.specs.push(target.spec);
+        else loads.directories.push(target.dir);
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return loads;
+}
+
+function addEdge(node: ModuleNode, target: string | null, names: string[]): void {
+  if (!target || target === node.file) return;
+  let set = node.edges.get(target);
+  if (!set) node.edges.set(target, (set = new Set()));
+  for (const n of names) set.add(n);
+}
+
+interface ScannedModule {
+  node: ModuleNode;
+  /** Directories the file loads through computed paths, as repo-relative prefixes. */
+  prefixes: string[];
+}
+
+type Resolve = (spec: string, fromAbs: string) => string | null;
+
+/** Read one file: its exports, what it imports, and the directories it loads through computed paths. */
+function scanModule(file: string, abs: string, text: string, isComponent: boolean, resolve: Resolve): ScannedModule {
+  const sf = isComponent
+    ? ts.createSourceFile(`${abs}.tsx`, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+    : ts.createSourceFile(abs, text, ts.ScriptTarget.Latest, true);
+  const node: ModuleNode = { file, edges: new Map(), exports: [], exportsAnything: COMMONJS_EXPORT.test(text), namespaces: new Set() };
+  const add = (spec: string, names: string[]) => addEdge(node, resolve(spec, abs), names);
+
+  for (const stmt of sf.statements) {
+    node.exports.push(...declaredExports(stmt));
+    if (ts.isModuleDeclaration(stmt) && ts.isIdentifier(stmt.name)) node.namespaces.add(stmt.name.text);
+    if (hasModifier(stmt, ts.SyntaxKind.ExportKeyword) || ts.isExportDeclaration(stmt) || ts.isExportAssignment(stmt)) {
+      node.exportsAnything = true;
+    }
+    const dependency = staticDependency(stmt);
+    if (dependency) add(dependency.spec, dependency.names);
+  }
+
+  const loads = dynamicLoads(sf);
+  for (const spec of loads.specs) add(spec, [ALL]);
+  // JSDoc type imports are not part of the walked tree: /** @type {import('./x').Foo} */
+  for (const m of text.matchAll(JSDOC_IMPORT)) add(m[1]!, [ALL]);
+
+  const dir = path.posix.dirname(file);
+  const prefixes = loads.directories.map((d) => protectedPrefix(dir, d)).filter((prefix) => prefix !== null);
+  return { node, prefixes };
+}
+
+/**
+ * Build the import graph for `files` (repo-relative source files) using the
+ * TypeScript compiler's own module resolution, so tsconfig `paths`, `.js` ->
+ * `.ts` mapping and index files behave exactly as they do in the project.
+ *
+ * The graph deliberately over-approximates usage: any string literal that
+ * looks like a relative path and resolves to a source file counts as a
+ * namespace import of it (covers `jest.mock('./x')`, `new Worker('./x.js')`,
+ * `new URL('./x.js', import.meta.url)` and friends).
+ */
 export function buildModuleGraph(root: string, files: string[], componentFiles: string[] = []): ModuleGraph {
   const options = loadCompilerOptions(root);
   const fileSet = new Set(files);
@@ -165,7 +336,7 @@ export function buildModuleGraph(root: string, files: string[], componentFiles: 
   const componentSet = new Set(componentFiles);
   const dynamicPrefixes = new Set<string>();
 
-  const resolve = (spec: string, fromAbs: string): string | null => {
+  const resolve: Resolve = (spec, fromAbs) => {
     const resolved = ts.resolveModuleName(spec, fromAbs, options, ts.sys, cache).resolvedModule?.resolvedFileName;
     if (!resolved) return null;
     const rel = toPosix(path.relative(root, resolved));
@@ -182,117 +353,10 @@ export function buildModuleGraph(root: string, files: string[], componentFiles: 
       continue;
     }
     if (isComponent) text = componentScript(file, text);
-    const sf = isComponent
-      ? ts.createSourceFile(`${abs}.tsx`, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
-      : ts.createSourceFile(abs, text, ts.ScriptTarget.Latest, true);
-    const node: ModuleNode = { file, edges: new Map(), exports: [], exportsAnything: COMMONJS_EXPORT.test(text), namespaces: new Set() };
+    const { node, prefixes } = scanModule(file, abs, text, isComponent, resolve);
     if (isComponent) components.push(node);
     else modules.set(file, node);
-    const dir = path.posix.dirname(file);
-
-    const add = (spec: string, names: string[]) => {
-      const target = resolve(spec, abs);
-      if (!target || target === file) return;
-      let set = node.edges.get(target);
-      if (!set) node.edges.set(target, (set = new Set()));
-      for (const n of names) set.add(n);
-    };
-
-    const protect = (relativeDir: string) => {
-      // A leading slash is relative to the project root (Vite's `/src/pages/*`).
-      const joined = relativeDir.startsWith('/')
-        ? path.posix.normalize(relativeDir.replace(/^\/+/, '') || '.')
-        : path.posix.normalize(path.posix.join(dir, relativeDir));
-      if (joined.startsWith('..')) return;
-      dynamicPrefixes.add(joined === '.' ? '' : joined.replace(/\/?$/, '/'));
-    };
-
-    for (const stmt of sf.statements) {
-      node.exports.push(...declaredExports(stmt));
-      if (ts.isModuleDeclaration(stmt) && ts.isIdentifier(stmt.name)) node.namespaces.add(stmt.name.text);
-      if (hasModifier(stmt, ts.SyntaxKind.ExportKeyword) || ts.isExportDeclaration(stmt) || ts.isExportAssignment(stmt)) {
-        node.exportsAnything = true;
-      }
-
-      if (ts.isImportDeclaration(stmt) && ts.isStringLiteral(stmt.moduleSpecifier)) {
-        const names: string[] = [];
-        const clause = stmt.importClause;
-        if (clause?.name) names.push('default');
-        const bindings = clause?.namedBindings;
-        if (bindings) {
-          if (ts.isNamespaceImport(bindings)) names.push(ALL);
-          else for (const el of bindings.elements) names.push((el.propertyName ?? el.name).text);
-        }
-        add(stmt.moduleSpecifier.text, names);
-      } else if (ts.isExportDeclaration(stmt) && stmt.moduleSpecifier && ts.isStringLiteral(stmt.moduleSpecifier)) {
-        const clause = stmt.exportClause;
-        const names =
-          clause && ts.isNamedExports(clause) ? clause.elements.map((el) => (el.propertyName ?? el.name).text) : [ALL];
-        add(stmt.moduleSpecifier.text, names);
-      } else if (
-        ts.isImportEqualsDeclaration(stmt) &&
-        ts.isExternalModuleReference(stmt.moduleReference) &&
-        ts.isStringLiteralLike(stmt.moduleReference.expression)
-      ) {
-        add(stmt.moduleReference.expression.text, [ALL]);
-      }
-    }
-
-    const visit = (n: ts.Node) => {
-      if (ts.isStringLiteralLike(n)) {
-        const isStaticSpecifier =
-          (ts.isImportDeclaration(n.parent) || ts.isExportDeclaration(n.parent)) && n.parent.moduleSpecifier === n;
-        if (!isStaticSpecifier && /^\.\.?(\/|$)/.test(n.text)) add(n.text, [ALL]);
-      } else if (ts.isCallExpression(n) && n.arguments.length > 0) {
-        const callee = n.expression;
-        const name = calleeName(callee);
-        if (isImportMetaGlob(callee)) {
-          // import.meta.glob('./modules/*.ts'): every match is loaded, none is imported by name.
-          for (const pattern of stringLiterals(n.arguments[0]!)) if (!pattern.startsWith('!')) protect(globBase(pattern) || '.');
-        } else if (name === 'context' && ts.isPropertyAccessExpression(callee) && calleeName(callee.expression) === 'require') {
-          const first = n.arguments[0]!;
-          protect(ts.isStringLiteralLike(first) ? first.text : '.');
-        } else if (name && !PATH_HELPER.test(name)) {
-          // requireDirectory(__dirname), fs.readdirSync(path.join(__dirname, 'tasks')), glob('./jobs/*.js')
-          const passesOwnDirectory = n.arguments.some(isOwnDirectory);
-          if (passesOwnDirectory || DIRECTORY_LOADER.test(name)) {
-            const literals = n.arguments
-              .flatMap((arg) => stringLiterals(arg))
-              .map((text) => (/[*{[?]/.test(text) ? globBase(text) || '.' : text));
-            const explicit = literals.filter((text) => /^\.{0,2}\//.test(text));
-            // Bare words are only directory names when joined onto something
-            // (`path.join(__dirname, 'tasks')`); they never replace the default.
-            const words = literals.filter((text) => /^[\w@-][\w@/-]*$/.test(text));
-            if (explicit.length === 0) protect('.');
-            for (const target of [...explicit, ...words]) protect(target);
-          }
-        }
-        const isLoader =
-          callee.kind === ts.SyntaxKind.ImportKeyword ||
-          (ts.isIdentifier(callee) && callee.text === 'require') ||
-          (ts.isPropertyAccessExpression(callee) &&
-            ts.isIdentifier(callee.expression) &&
-            callee.expression.text === 'require');
-        const arg = n.arguments[0]!;
-        if (isLoader) {
-          if (ts.isStringLiteralLike(arg)) {
-            add(arg.text, [ALL]);
-          } else if (ts.isTemplateExpression(arg) && /^\.\.?\//.test(arg.head.text)) {
-            // import(`./locales/${lang}.js`): everything under ./locales may be loaded.
-            const head = arg.head.text;
-            protect(head.endsWith('/') ? head : path.posix.dirname(head));
-          } else {
-            // Fully dynamic: assume it can reach anything next to this file.
-            protect('.');
-          }
-        }
-      }
-      ts.forEachChild(n, visit);
-    };
-    visit(sf);
-
-    // JSDoc type imports are not part of the walked tree: /** @type {import('./x').Foo} */
-    for (const m of text.matchAll(JSDOC_IMPORT)) add(m[1]!, [ALL]);
+    for (const prefix of prefixes) dynamicPrefixes.add(prefix);
   }
 
   return { modules, components, dynamicPrefixes: [...dynamicPrefixes] };
