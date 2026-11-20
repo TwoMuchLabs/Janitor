@@ -8,7 +8,8 @@
  * the more shapes of project, the better. A clean result is evidence, not proof.
  *
  * What one snapshot covers (the names are what --only accepts):
- *   project   for each repository: the module graph, entry points, reachability and
+ *   project   for each repository, and for a project made to contain every framework
+ *             convention and every way of loading a directory: the module graph, entry points, reachability and
  *             mentions, with the default config, with `entry` globs and with `ignore`
  *             globs; and what each scanning category proposes
  *   edits     removeExport() for the exports of each source file, and tidyImports() on
@@ -203,6 +204,94 @@ async function snapPaths(src: string, repo: string, snap: Snap): Promise<void> {
   }
 }
 
+/**
+ * A project made to contain what the sample projects may not: every framework convention,
+ * every way of loading a directory, components, pages that load scripts, nested packages.
+ */
+const SHAPES: Record<string, string> = {
+  'package.json': JSON.stringify({
+    name: 'shapes', main: 'dist/index.js', types: './dist/index.d.ts', bin: { shapes: './bin/cli.js' },
+    exports: { '.': './dist/index.js', './unsafe/*': './lib/*', './deep': { import: './distribution/deep.mjs' } },
+    scripts: { build: 'node tools/build.mjs && tsx src/gen.ts', test: 'vitest' }, workspaces: ['packages/*'],
+    dependencies: { 'unplugin-auto-import': '1' },
+  }),
+  'tsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: '.', paths: { '@lib/*': ['lib/*'] }, allowJs: true, module: 'ESNext', moduleResolution: 'Bundler' } }),
+  'src/index.ts': "import def, { a as renamed, type T } from './named';\nimport * as ns from './ns';\nimport './side-effect';\nexport * from './reexported';\nexport { x as y } from './picked';\nimport legacy = require('./legacy');\nexport const used = [def, renamed, ns, legacy];\nexport type U = T;\n",
+  'src/named.ts': 'export default 1;\nexport const a = 1;\nexport type T = string;\nexport const unusedConst = { a: 1, b: [2, -3], c: () => 4 };\nexport let sideEffect = compute();\nexport function unusedFn() {}\nexport class Plain { static n = 1; m() {} }\nexport class Impure { static n = compute(); }\nexport enum E { A }\nexport interface Merged { a: 1 }\nexport namespace Merged { export const b = 2; }\nexport const [d1, d2] = [1, 2];\nfunction compute() { return 1; }\n',
+  'src/ns.ts': 'export const one = 1;\nexport const two = 2;\n',
+  'src/side-effect.ts': 'console.log(1);\n',
+  'src/reexported.ts': 'export const r = 1;\n',
+  'src/picked.ts': 'export const x = 1;\nexport const notPicked = 2;\n',
+  'src/legacy.js': "module.exports = { a: 1 };\nexports.b = 2;\n",
+  'src/gen.ts': "const worker = new Worker('./worker.js');\nconst url = new URL('./asset-loader.ts', import.meta.url);\njest.mock('./mocked');\nexport {};\n",
+  'src/worker.js': 'postMessage(1);\n',
+  'src/asset-loader.ts': 'export const load = 1;\n',
+  'src/mocked.ts': 'export const m = 1;\n',
+  'src/loaders.ts': "const pages = import.meta.glob('./pages/*.ts');\nconst eager = import.meta.globEager(['/src/eager/**', '!./pages/skip.ts']);\nconst ctx = require.context('./ctx', true);\nconst ctx2 = require.context(dirVar);\nconst lang = import(`./locales/${name}.js`);\nconst any = import(somewhere);\nconst lit = import('./lazy');\nconst res = require.resolve('./resolved');\nfs.readdirSync(path.join(__dirname, 'tasks'));\nrequireDirectory(__dirname);\nglob('./jobs/*.js');\nglobby(['../outside/*.js', '/abs/*.js']);\nreaddir(import.meta.dirname);\npath.join(__dirname, 'not-a-loader');\nwalk('./walked/');\nexport {};\n",
+  'src/pages/home.ts': 'export const page = 1;\n',
+  'src/eager/e.ts': 'export const e = 1;\n',
+  'src/ctx/c.ts': 'export const c = 1;\n',
+  'src/locales/en.js': 'export default {};\n',
+  'src/lazy.ts': 'export const lazy = 1;\n',
+  'src/resolved.ts': 'export const resolved = 1;\n',
+  'src/tasks/t.ts': 'export const t = 1;\n',
+  'src/jobs/j.js': 'export const j = 1;\n',
+  'src/walked/w.ts': 'export const w = 1;\n',
+  'src/jsdoc.js': "/** @type {import('./typed-only').Foo} */\nexport const typed = {};\n",
+  'src/typed-only.ts': 'export interface Foo { a: 1 }\nexport interface UnusedType { b: 2 }\n',
+  'src/alias.ts': "import { viaAlias } from '@lib/aliased';\nexport const z = viaAlias;\n",
+  'lib/aliased.ts': 'export const viaAlias = 1;\nexport const aliasUnused = 2;\n',
+  'lib/extra/deep.ts': 'export const deep = 1;\n',
+  'source/deep.ts': 'export const fromUnknownLayout = 1;\n',
+  'src/orphan.ts': "import { chained } from './orphan-dep';\nexport const orphan = chained;\n",
+  'src/orphan-dep.ts': 'export const chained = 1;\n',
+  'src/script-like.ts': 'console.log("run by hand");\n',
+  'src/platform.ts': 'export const p = 1;\n',
+  'src/platform-browser.ts': 'export const p = 2;\n',
+  'src/mentioned-in-yaml.ts': 'export const fromYaml = 1;\n',
+  'ci.yml': 'run: node src/mentioned-in-yaml.ts\nflag: fromYaml\n',
+  'src/App.vue': "<template><div/></template>\n<script setup lang=\"ts\">\nimport { onlyFromVue } from './vue-dep';\n</script>\n",
+  'src/vue-dep.ts': 'export const onlyFromVue = 1;\nexport const vueUnused = 2;\n',
+  'src/Widget.svelte': "<script>\n  import { s } from './svelte-dep.js';\n</script>\n<p>{s}</p>\n",
+  'src/svelte-dep.js': 'export const s = 1;\n',
+  'src/pages/index.astro': "---\nimport { fm } from '../astro-dep';\n---\n<script>import '../astro-script';</script>\n",
+  'src/astro-dep.ts': 'export const fm = 1;\n',
+  'src/astro-script.ts': 'export {};\n',
+  'index.html': '<script type="module" src="/src/main.tsx"></script>\n<script src="./src/relative.js"></script>\n<script src="https://cdn.example/x.js"></script>\n<script src="//cdn.example/y.js"></script>\n',
+  'src/main.tsx': 'export const App = () => null;\n',
+  'src/relative.js': 'window.x = 1;\n',
+  'bin/cli.js': "#!/usr/bin/env node\nrequire('../src/legacy');\n",
+  'tools/build.mjs': 'console.log("build");\n',
+  'broken/package.json': '{ not json',
+  'node_modules/dep/package.json': '{"main":"index.js"}',
+  'node_modules/dep/index.js': 'module.exports = 1;\n',
+  ...Object.fromEntries([
+    ['next', ['next'], ['app/page.tsx', 'pages/api/hello.ts', 'middleware.ts', 'src/app/layout.tsx', 'lib/unused.ts', 'next.config.mjs']],
+    ['kit', ['@sveltejs/kit'], ['src/routes/+page.ts', 'src/hooks.server.ts', 'src/params/id.ts', 'src/lib/unused.ts']],
+    ['remix', ['@remix-run/react'], ['app/routes/home.tsx', 'app/root.tsx', 'app/unused.ts']],
+    ['nuxt', ['nuxt'], ['pages/index.ts', 'composables/useThing.ts', 'utils/helper.ts', 'app.ts', 'other/unused.ts']],
+    ['astro', ['astro'], ['src/pages/a.ts', 'src/middleware.ts', 'src/content/config.ts', 'src/unused.ts']],
+    ['expo', ['expo-router', 'expo'], ['app/tab.tsx', 'App.tsx', 'index.js', 'app.config.ts', 'lib/unused.ts']],
+    ['gatsby', ['gatsby'], ['src/pages/p.tsx', 'src/templates/t.tsx', 'gatsby-node.js', 'src/unused.ts']],
+    ['nest', ['@nestjs/core'], ['src/main.ts', 'src/unused.ts']],
+    ['docusaurus', ['@docusaurus/core'], ['src/theme/x.tsx', 'docusaurus.config.js', 'sidebars.js', 'docs/intro.tsx', 'src/unused.ts']],
+    ['vitepress', ['vitepress'], ['.vitepress/config.ts', 'docs/.vitepress/theme/index.ts', 'src/unused.ts']],
+    ['storybook', ['storybook'], ['.storybook/main.ts', 'src/unused.ts']],
+    ['plain', [], ['src/index.ts', 'src/cli.ts', 'src/unused.ts', 'index.js']],
+  ].flatMap(([name, deps, files]) => [
+    [`packages/${name}/package.json`, JSON.stringify({ name, peerDependencies: Object.fromEntries((deps as string[]).map((d) => [d, '*'])), devDependencies: 'not an object' })],
+    ...(files as string[]).map((f) => [`packages/${name}/${f}`, `export const from_${String(name)} = ${JSON.stringify(f)};\n`]),
+  ])),
+};
+
+/** The same project, as one package without workspaces: nested packages then count as separate. */
+function writeShapes(work: string): string[] {
+  const whole = makeRepo(path.join(work, 'shapes'), SHAPES);
+  const { workspaces: _dropped, ...rootPackage } = JSON.parse(SHAPES['package.json']!);
+  const separate = makeRepo(path.join(work, 'shapes-separate'), { ...SHAPES, 'package.json': JSON.stringify({ ...rootPackage, dependencies: {} }) });
+  return [whole, separate];
+}
+
 // --- config ---------------------------------------------------------------------------------
 
 async function snapConfig(src: string, snap: Snap): Promise<void> {
@@ -376,7 +465,7 @@ function snapCli(src: string, work: string, snap: Snap): void {
 async function takeSnapshot(src: string, out: string, work: string, repos: string[], only: string[]): Promise<void> {
   const snap: Snap = {};
   const wanted = (part: string) => only.length === 0 || only.includes(part);
-  for (const repo of repos) {
+  for (const repo of [...repos, ...(only.length === 0 || ['project', 'edits', 'paths'].some(wanted) ? writeShapes(work) : [])]) {
     if (wanted('project')) await snapProject(src, repo, snap);
     if (wanted('edits')) await snapEdits(src, repo, snap);
     if (wanted('paths')) await snapPaths(src, repo, snap);
