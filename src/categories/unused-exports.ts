@@ -127,6 +127,49 @@ export function removeExport(text: string, fileName: string, name: string): { te
   return { text: out, kind: deletable ? 'deleted' : 'unexported' };
 }
 
+type Project = Awaited<ReturnType<typeof analyzeProject>>;
+type ModuleNode = Project['graph']['components'][number];
+type ExportDecl = ModuleNode['exports'][number];
+
+/** For each file, the names other modules and components import from it (may contain ALL). */
+function importedNamesByFile(graph: Project['graph']): Map<string, Set<string>> {
+  const used = new Map<string, Set<string>>();
+  for (const mod of [...graph.modules.values(), ...graph.components]) {
+    for (const [target, names] of mod.edges) {
+      let set = used.get(target);
+      if (!set) used.set(target, (set = new Set()));
+      for (const n of names) set.add(n);
+    }
+  }
+  return used;
+}
+
+/** The exports of one module that nothing imports and nothing else mentions, each name once. */
+function unusedIn(mod: ModuleNode, importedNames: Set<string>, project: Project): ExportDecl[] {
+  const unused = new Map<string, ExportDecl>();
+  for (const exp of mod.exports) {
+    if (unused.has(exp.name) || importedNames.has(exp.name) || project.mentions.identifiers.has(exp.name)) continue;
+    // With automatic imports, a name another file mentions may be used there without importing it.
+    if (project.entryPoints.autoImports && (project.mentions.sourceFileCounts.get(exp.name) ?? 0) > 1) continue;
+    // `interface X` merged with `namespace X` must stay exported together.
+    if (mod.namespaces.has(exp.name)) continue;
+    unused.set(exp.name, exp);
+  }
+  return [...unused.values()];
+}
+
+function removalItem(file: string, exp: ExportDecl): CleanupItem {
+  return {
+    id: `unused-export:${file}#${exp.name}`,
+    description: `remove unused export \`${exp.name}\` (${exp.kind}) from \`${file}\``,
+    async apply(c) {
+      const abs = path.join(c.root, file);
+      const result = removeExport(await fs.readFile(abs, 'utf8'), abs, exp.name);
+      if (result) await editKeepingFormat(c.root, file, () => fs.writeFile(abs, result.text));
+    },
+  };
+}
+
 /**
  * Named exports that no other module imports. Entry-point files are skipped
  * (their exports are public API), as is anything whose name appears in a file
@@ -146,15 +189,7 @@ export const unusedExports: Category = {
         notes: ['No entry points were found, so exports could not be told apart from public API and none were removed. Add `entry` globs to `.janitor.json`.'],
       };
     }
-    const used = new Map<string, Set<string>>();
-    for (const mod of [...project.graph.modules.values(), ...project.graph.components]) {
-      for (const [target, names] of mod.edges) {
-        let set = used.get(target);
-        if (!set) used.set(target, (set = new Set()));
-        for (const n of names) set.add(n);
-      }
-    }
-
+    const used = importedNamesByFile(project.graph);
     const items: CleanupItem[] = [];
     for (const mod of project.graph.modules.values()) {
       const file = mod.file;
@@ -162,25 +197,7 @@ export const unusedExports: Category = {
       if (!project.reachable.has(file) || project.entryPoints.entries.has(file) || project.isIgnored(file)) continue;
       const importedNames = used.get(file) ?? new Set<string>();
       if (importedNames.has(ALL)) continue;
-
-      const seen = new Set<string>();
-      for (const exp of mod.exports) {
-        if (seen.has(exp.name) || importedNames.has(exp.name) || project.mentions.identifiers.has(exp.name)) continue;
-        // With automatic imports, a name another file mentions may be used there without importing it.
-        if (project.entryPoints.autoImports && (project.mentions.sourceFileCounts.get(exp.name) ?? 0) > 1) continue;
-        // `interface X` merged with `namespace X` must stay exported together.
-        if (mod.namespaces.has(exp.name)) continue;
-        seen.add(exp.name);
-        items.push({
-          id: `unused-export:${file}#${exp.name}`,
-          description: `remove unused export \`${exp.name}\` (${exp.kind}) from \`${file}\``,
-          async apply(c) {
-            const abs = path.join(c.root, file);
-            const result = removeExport(await fs.readFile(abs, 'utf8'), abs, exp.name);
-            if (result) await editKeepingFormat(c.root, file, () => fs.writeFile(abs, result.text));
-          },
-        });
-      }
+      for (const exp of unusedIn(mod, importedNames, project)) items.push(removalItem(file, exp));
     }
     return { items, notes: [] };
   },
