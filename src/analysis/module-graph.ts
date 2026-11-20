@@ -18,6 +18,12 @@ interface ModuleNode {
   edges: Map<string, Set<string>>;
   /** Named, non-default exports declared with an `export` modifier. */
   exports: ExportDecl[];
+  /**
+   * Whether the file exposes anything at all to importers (ES exports of any
+   * shape, or CommonJS `module.exports` / `exports.x`). A file that exports
+   * nothing can only be useful when run directly or loaded for its side effects.
+   */
+  exportsAnything: boolean;
 }
 
 export interface ModuleGraph {
@@ -74,6 +80,7 @@ export function declaredExports(stmt: ts.Statement): ExportDecl[] {
 }
 
 const JSDOC_IMPORT = /import\(\s*['"]([^'"]+)['"]\s*\)/g;
+const COMMONJS_EXPORT = /\bmodule\.exports\b|\bexports\s*(?:\.[A-Za-z_$]|\[)/;
 
 /**
  * Build the import graph for `files` (repo-relative source files) using the
@@ -108,7 +115,7 @@ export function buildModuleGraph(root: string, files: string[]): ModuleGraph {
       continue;
     }
     const sf = ts.createSourceFile(abs, text, ts.ScriptTarget.Latest, true);
-    const node: ModuleNode = { file, edges: new Map(), exports: [] };
+    const node: ModuleNode = { file, edges: new Map(), exports: [], exportsAnything: COMMONJS_EXPORT.test(text) };
     modules.set(file, node);
     const dir = path.posix.dirname(file);
 
@@ -127,6 +134,9 @@ export function buildModuleGraph(root: string, files: string[]): ModuleGraph {
 
     for (const stmt of sf.statements) {
       node.exports.push(...declaredExports(stmt));
+      if (hasModifier(stmt, ts.SyntaxKind.ExportKeyword) || ts.isExportDeclaration(stmt) || ts.isExportAssignment(stmt)) {
+        node.exportsAnything = true;
+      }
 
       if (ts.isImportDeclaration(stmt) && ts.isStringLiteral(stmt.moduleSpecifier)) {
         const names: string[] = [];

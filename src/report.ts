@@ -17,7 +17,7 @@ interface Totals {
   categories: CategoryTotals[];
   /** Net bytes removed across everything that was kept. */
   bytesRemoved: number;
-  /** Lines deleted by dead-code categories only (lockfile churn is not dead code). */
+  /** Net lines removed by dead-code categories only (lockfile churn is not dead code; an edited line is not a removed line). */
   deadCodeLines: number;
   deadCodeBytes: number;
   itemsKept: number;
@@ -65,7 +65,8 @@ export function computeTotals(report: RunReport): Totals {
       totals.bytesRemoved += bytes;
       totals.commits++;
       if (step.countsAsDeadCode) {
-        totals.deadCodeLines += step.stats.linesDeleted;
+        // Net lines: dropping an `export` keyword rewrites a line without removing one.
+        totals.deadCodeLines += Math.max(0, step.stats.linesDeleted - step.stats.linesAdded);
         totals.deadCodeBytes += bytes;
       }
     } else if (step.status === 'reverted') {

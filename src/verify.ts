@@ -30,7 +30,7 @@ const TYPECHECK_SCRIPTS = ['typecheck', 'type-check', 'check-types', 'types', 't
 
 /**
  * Work out the project's existing verification suite, cheapest first so a
- * broken step fails fast: typecheck, then build, then tests.
+ * broken step fails fast: typecheck, then build, then `check`, then tests.
  */
 export function detectVerifyCommands(root: string): string[] {
   const commands: string[] = [];
@@ -55,6 +55,8 @@ export function detectVerifyCommands(root: string): string[] {
       commands.push('npx --no-install tsc --noEmit');
     }
     if (typeof scripts.build === 'string') commands.push(`${pm} run build`);
+    // A project-defined `check` script is its own idea of "is this still sound"; run it after the build it may depend on.
+    if (typeof scripts.check === 'string') commands.push(`${pm} run check`);
     if (typeof scripts.test === 'string' && !/no test specified/i.test(scripts.test)) commands.push(`${pm} test`);
     return commands;
   }

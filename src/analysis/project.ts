@@ -28,6 +28,12 @@ interface ProjectAnalysis {
   reachable: Set<string>;
   mentions: Mentions;
   isIgnored: (file: string) => boolean;
+  /**
+   * Directories holding their own package.json that the root project does not
+   * declare as workspaces. The root verification suite does not exercise them,
+   * so nothing inside them is touched.
+   */
+  separatePackages: string[];
 }
 
 const PATH_TOKEN = /[A-Za-z0-9_@.\-/]+/g;
@@ -66,6 +72,24 @@ export function isMentioned(file: string, mentions: Mentions): boolean {
   return false;
 }
 
+/** Nested packages that are projects of their own rather than workspaces of the root. */
+function findSeparatePackages(root: string, tracked: string[]): string[] {
+  const nested = tracked
+    .filter((f) => path.posix.basename(f) === 'package.json' && f !== 'package.json' && !f.includes('node_modules/'))
+    .map((f) => path.posix.dirname(f));
+  if (nested.length === 0) return [];
+  let hasWorkspaces = tracked.includes('pnpm-workspace.yaml') || tracked.includes('lerna.json');
+  const rootPkg = readText(root, 'package.json');
+  if (rootPkg) {
+    try {
+      hasWorkspaces ||= (JSON.parse(rootPkg) as { workspaces?: unknown }).workspaces !== undefined;
+    } catch {
+      /* unreadable root package.json: treat nested packages as separate */
+    }
+  }
+  return hasWorkspaces ? [] : nested.sort();
+}
+
 export async function analyzeProject(ctx: JanitorContext): Promise<ProjectAnalysis> {
   const tracked = await trackedFiles(ctx);
   const sources = tracked.filter((f) => isSource(f) && !f.includes('node_modules/'));
@@ -75,7 +99,7 @@ export async function analyzeProject(ctx: JanitorContext): Promise<ProjectAnalys
 
   const mentions: Mentions = { basenames: new Set(), pairs: new Set(), identifiers: new Set() };
   for (const file of tracked) {
-    if (isLockfile(file) || /\.(?:md|map|snap|svg|lock)$/i.test(file)) continue;
+    if (isLockfile(file) || /\.(?:map|snap|svg|lock)$/i.test(file)) continue;
     if (isSource(file)) {
       if (!reachable.has(file)) continue;
       const text = readText(ctx.root, file);
@@ -84,19 +108,22 @@ export async function analyzeProject(ctx: JanitorContext): Promise<ProjectAnalys
       const text = readText(ctx.root, file);
       if (!text) continue;
       addPathTokens(text, mentions);
-      // package.json names its own dependencies and scripts; it never "uses" an export.
-      if (path.posix.basename(file) !== 'package.json') {
+      // Prose and package.json can name a file (`node scripts/x.mjs`) but never "use" an export.
+      if (path.posix.basename(file) !== 'package.json' && !/\.md$/i.test(file)) {
         for (const id of text.match(IDENTIFIER) ?? []) mentions.identifiers.add(id);
       }
     }
   }
 
+  const separatePackages = findSeparatePackages(ctx.root, tracked);
+  const matchesIgnore = makeMatcher([...DEFAULT_IGNORE, ...ctx.config.ignore]);
   return {
     sources,
     graph,
     entryPoints,
     reachable,
     mentions,
-    isIgnored: makeMatcher([...DEFAULT_IGNORE, ...ctx.config.ignore]),
+    isIgnored: (file) => matchesIgnore(file) || separatePackages.some((dir) => file.startsWith(`${dir}/`)),
+    separatePackages,
   };
 }

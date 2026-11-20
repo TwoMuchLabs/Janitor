@@ -51,8 +51,7 @@ Dead code removed: 403 B, 18 line(s).
          - uses: actions/setup-node@v5
            with:
              node-version: 22
-             cache: npm
-         - run: npm ci
+         - run: if [ -f package-lock.json ]; then npm ci; fi
          - uses: TwoMuchLabs/Janitor@main   # pin to a release tag once one is published
    ```
 
@@ -131,8 +130,12 @@ It is deliberately biased towards leaving things alone:
   (`jest.mock('./x')`, `new Worker('./x.js')`, `new URL('./x.js', import.meta.url)`).
 - ``import(`./locales/${lang}.js`)`` protects everything under `./locales/`; a fully
   dynamic `import(x)` / `require(x)` protects the importing file's directory.
-- A file named in any non-code file (Dockerfile, workflow YAML, HTML, `.vue`, ...) is kept,
-  and an export whose name appears in one is kept.
+- A file named in any non-code file (Dockerfile, workflow YAML, HTML, `.vue`, ...) or in the
+  docs is kept, and an export whose name appears in a non-code file is kept.
+- A file that nothing imports and that exports nothing is treated as a script someone runs
+  by hand (`node tools/report.mjs`). It is listed in the PR, never deleted.
+- A nested folder with its own `package.json` that is not a workspace of the root is a
+  separate project your checks do not cover. Nothing inside it is touched.
 - Entry-point exports are public API and are never touched. Default exports are never touched.
 - Major updates, and 0.x minor updates, are never applied; they are listed in the PR.
 
@@ -183,7 +186,7 @@ Everything is optional. Put a `.janitor.json` in the repository root:
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `categories` | all four | Which categories run, in order |
-| `verify` | detected | Commands that must all pass. Detected from `package.json` scripts (`typecheck`, `build`, `test`), `Cargo.toml` or `go.mod` |
+| `verify` | detected | Commands that must all pass. Detected from `package.json` scripts (`typecheck`, `build`, `check`, `test`), `Cargo.toml` or `go.mod` |
 | `entry` | `[]` | Extra globs for files that are used without being imported |
 | `ignore` | `[]` | Globs the janitor must never delete or edit (generated code, `dist/`, `vendor/` are ignored already) |
 | `flags.registry` | detected | JSON object of flags (`flags.json`, `config/flags.json`, ...), optionally under a `flags` key |
@@ -290,6 +293,7 @@ export const removeTodoFiles: Category = {
   languages still get `stale-flags` and whatever verification you configure.
 - One root `tsconfig.json` is used for resolution. Monorepos work when packages
   import each other through workspace links; per-package `paths` are not read yet.
+  Nested packages that are not workspaces are skipped; run janitor in each with `working-directory`.
 - `export { a, b }` lists, `export default` and CommonJS `module.exports` are not pruned.
 - Removing an export can leave an import that only it used. With `noUnusedLocals`
   or a lint step in `verify`, that step is reverted rather than fixed up.
@@ -303,7 +307,7 @@ export const removeTodoFiles: Category = {
 ```bash
 npm ci
 npm run typecheck
-npm test          # 41 tests; the engine suite drives real temporary git repositories
+npm test          # 44 tests; the engine suite drives real temporary git repositories
 npm run build
 ```
 

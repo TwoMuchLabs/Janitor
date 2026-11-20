@@ -105,6 +105,9 @@ test('detectVerifyCommands reads the project, cheapest check first', () => {
   });
   assert.deepEqual(detectVerifyCommands(pnpm), ['pnpm run build']);
 
+  const checkOnly = makeRepo({ 'package.json': JSON.stringify({ scripts: { check: 'node --check app.js', build: 'node build.mjs' } }) });
+  assert.deepEqual(detectVerifyCommands(checkOnly), ['npm run build', 'npm run check']);
+
   assert.deepEqual(detectVerifyCommands(makeRepo({ 'Cargo.toml': '[package]' })), ['cargo check --all-targets', 'cargo test']);
   assert.deepEqual(detectVerifyCommands(makeRepo({ 'README.md': '' })), []);
 });
@@ -146,4 +149,28 @@ test('resolveConfig validates and merges over defaults', () => {
   assert.throws(() => resolveConfig({ categories: ['nope'] }), ConfigError);
   assert.throws(() => resolveConfig({ maxVerifyRuns: 0 }), ConfigError);
   assert.throws(() => resolveConfig({ branchPrefix: 'bad prefix;rm' }), ConfigError);
+});
+
+test('an edited line is not counted as a removed line of dead code', async () => {
+  const root = makeRepo({ 'lib.js': 'export const a = 1;\nexport const b = 2;\n' });
+  const report = await runJanitor({
+    root,
+    date: '2026-11-20',
+    verify: ['true'],
+    categories: [
+      fakeCategory('unused-exports', [
+        {
+          id: 'x',
+          description: 'unexport a',
+          async apply(ctx) {
+            write(ctx.root, { 'lib.js': 'const a = 1;\nexport const b = 2;\n' });
+          },
+        },
+      ]),
+    ],
+  });
+  const totals = computeTotals(report);
+  assert.equal(totals.deadCodeBytes, 7);
+  assert.equal(totals.deadCodeLines, 0);
+  assert.match(renderPrBody(report), /Removed \*\*7 B\*\* and \*\*0 lines\*\* of dead code/);
 });

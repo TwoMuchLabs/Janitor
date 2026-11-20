@@ -32,10 +32,10 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-          cache: npm
 
       # Install exactly what your CI installs, so the janitor's verification matches it.
-      - run: npm ci
+      # (Skipped automatically for projects with no lockfile and nothing to install.)
+      - run: if [ -f package-lock.json ]; then npm ci; fi
 
       - uses: TwoMuchLabs/Janitor@main   # pin to a release tag once one is published
         # with:

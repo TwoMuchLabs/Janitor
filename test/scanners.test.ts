@@ -59,7 +59,7 @@ test('dead-files: honours user entry and ignore globs and tsconfig paths', async
     'src/aliased.ts': `export const v = 1;\n`,
     'src/jobs/nightly.ts': `console.log('cron');\n`,
     'src/legacy/keep.ts': `console.log('keep');\n`,
-    'src/legacy/drop.ts': `console.log('drop');\n`,
+    'src/legacy/drop.ts': `export const drop = 1;\n`,
   });
   const { items } = await deadFiles.scan(context(root, { entry: ['src/jobs/**'], ignore: ['src/legacy/keep.ts'] }));
   assert.deepEqual(ids(items), ['dead-file:src/legacy/drop.ts']);
@@ -182,4 +182,47 @@ test('dead-files: keeps whatever a held-back file still imports', async () => {
   });
   const { items } = await deadFiles.scan(context(root));
   assert.deepEqual(ids(items), ['dead-file:src/orphan.ts']);
+});
+
+test('dead-files: keeps standalone scripts and files the docs tell people to run', async () => {
+  const root = makeRepo({
+    'package.json': pkg(),
+    'src/index.ts': `import { a } from './a';\nconsole.log(a);\n`,
+    'src/a.ts': `export const a = 1;\n`,
+    // run by hand, exports nothing, mentioned nowhere
+    'design/mockups.mjs': `import { a } from '../src/a.ts';\nconsole.log(a);\n`,
+    'design/legacy.cjs': `const x = 1;\nconsole.log(x);\n`,
+    // exports something, but the README documents running it
+    'design/prototype.mjs': `export const run = () => {};\nrun();\n`,
+    'README.md': 'Build the prototype with `node design/prototype.mjs`.\n',
+    // genuinely forgotten modules, ES and CommonJS
+    'src/old-util.ts': `export const old = 1;\n`,
+    'src/old-cjs.js': `module.exports = { old: 1 };\n`,
+  });
+  const { items, notes } = await deadFiles.scan(context(root));
+  assert.deepEqual(ids(items), ['dead-file:src/old-cjs.js', 'dead-file:src/old-util.ts']);
+  assert.match(notes.join('\n'), /2 file\(s\) that nothing imports were kept because they export nothing.*`design\/legacy\.cjs`, `design\/mockups\.mjs`/);
+  assert.match(notes.join('\n'), /1 unreachable file\(s\) were kept/);
+});
+
+test('nested packages that are not workspaces are left alone', async () => {
+  const files = {
+    'package.json': pkg(),
+    'src/index.ts': `console.log(1);\n`,
+    'src/old.ts': `export const old = 1;\n`,
+    'sites/promo/package.json': JSON.stringify({ name: 'promo', main: 'src/index.js' }),
+    'sites/promo/src/index.js': `import { used } from './lib.js';\nconsole.log(used);\n`,
+    'sites/promo/src/lib.js': `export const used = 1;\nexport const unusedThere = 2;\n`,
+    'sites/promo/src/forgotten.js': `export const f = 1;\n`,
+  };
+  const separate = context(makeRepo(files));
+  const dead = await deadFiles.scan(separate);
+  assert.deepEqual(ids(dead.items), ['dead-file:src/old.ts']);
+  assert.match(dead.notes.join('\n'), /1 nested package\(s\) were left untouched.*`sites\/promo\/`/);
+  assert.deepEqual(ids((await unusedExports.scan(separate)).items), []);
+
+  // Declared as a workspace, the same package is part of the project and is cleaned with it.
+  const workspace = context(makeRepo({ ...files, 'package.json': pkg({ workspaces: ['sites/*'] }) }));
+  assert.deepEqual(ids((await deadFiles.scan(workspace)).items), ['dead-file:sites/promo/src/forgotten.js', 'dead-file:src/old.ts']);
+  assert.deepEqual(ids((await unusedExports.scan(workspace)).items), ['unused-export:sites/promo/src/lib.js#unusedThere']);
 });

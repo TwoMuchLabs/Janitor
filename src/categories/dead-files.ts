@@ -17,6 +17,12 @@ export const deadFiles: Category = {
   async scan(ctx) {
     const project = await analyzeProject(ctx);
     const notes: string[] = [];
+    if (project.separatePackages.length > 0) {
+      const shown = project.separatePackages.slice(0, 5).map((d) => `\`${d}/\``).join(', ');
+      notes.push(
+        `${project.separatePackages.length} nested package(s) were left untouched because this project's checks do not cover them: ${shown}. Run janitor inside each one (the Action's \`working-directory\` input) to clean them.`,
+      );
+    }
 
     if (project.entryPoints.roots === 0) {
       notes.push(
@@ -27,14 +33,24 @@ export const deadFiles: Category = {
 
     // Unreachable files we will not touch are still alive for the purposes of
     // the graph: whatever they import has to stay too.
-    const heldBack = project.sources.filter(
-      (file) =>
-        !project.reachable.has(file) &&
-        (project.isIgnored(file) ||
-          project.graph.dynamicPrefixes.some((prefix) => file.startsWith(prefix)) ||
-          isMentioned(file, project.mentions)),
-    );
-    const live = reachableFrom(project.graph, [...project.entryPoints.entries, ...heldBack]);
+    const heldBack: string[] = [];
+    const scripts: string[] = [];
+    for (const file of project.sources) {
+      if (project.reachable.has(file)) continue;
+      if (
+        project.isIgnored(file) ||
+        project.graph.dynamicPrefixes.some((prefix) => file.startsWith(prefix)) ||
+        isMentioned(file, project.mentions)
+      ) {
+        heldBack.push(file);
+      } else if (!project.graph.modules.get(file)?.exportsAnything) {
+        // Nothing imports it and it exports nothing: that is the shape of a
+        // program someone runs by hand (`node tools/report.mjs`), not of a
+        // forgotten module. No test would notice it going missing.
+        scripts.push(file);
+      }
+    }
+    const live = reachableFrom(project.graph, [...project.entryPoints.entries, ...heldBack, ...scripts]);
     const dead = project.sources.filter((file) => !live.has(file));
     const deadSet = new Set(dead);
 
@@ -84,9 +100,16 @@ export const deadFiles: Category = {
         };
       });
 
+    if (scripts.length > 0) {
+      const shown = scripts.slice(0, 5).map((f) => `\`${f}\``).join(', ');
+      const more = scripts.length > 5 ? ` and ${scripts.length - 5} more` : '';
+      notes.push(
+        `${scripts.length} file(s) that nothing imports were kept because they export nothing, so they look like scripts run by hand: ${shown}${more}. Delete them yourself if they are obsolete, or list them under \`entry\` to silence this note.`,
+      );
+    }
     if (heldBack.length > 0) {
       notes.push(
-        `${heldBack.length} unreachable file(s) were kept because they are ignored, sit under a dynamically imported directory, or are mentioned by name in a non-code file.`,
+        `${heldBack.length} unreachable file(s) were kept because they are ignored, sit under a dynamically imported directory, or are mentioned by name in a non-code file or the docs.`,
       );
     }
     return { items, notes };
