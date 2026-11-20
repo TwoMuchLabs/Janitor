@@ -107,6 +107,56 @@ function collectStrings(value: unknown, out: string[]): void {
   else if (value && typeof value === 'object') for (const v of Object.values(value)) collectStrings(v, out);
 }
 
+/** Add the source files a path stem stands for: `x` is `x.ts`, `x/index.ts` and so on; a `*` matches anything. */
+function addMatches(found: Set<string>, stem: string, sources: Set<string>): void {
+  if (stem.includes('*')) {
+    // In package.json `exports`, `*` matches across directories: "./unsafe/*": "./lib/*"
+    // publishes every file under lib/, however deep.
+    const re = new RegExp(`^${stem.replace(/[.+^$()|[\]\\{}?]/g, '\\$&').replace(/\*/g, '.*')}(?:\\.[^/]*)?$`);
+    for (const f of sources) if (re.test(f)) found.add(f);
+    return;
+  }
+  for (const ext of SOURCE_EXTS) {
+    if (sources.has(stem + ext)) found.add(stem + ext);
+    if (sources.has(`${stem}/index${ext}`)) found.add(`${stem}/index${ext}`);
+  }
+}
+
+/** Where the source of a declared path may live: as declared, and with a known output directory swapped for `src/` or dropped. */
+function sourceStems(stem: string, prefix: string, segments: string[]): Set<string> {
+  const stems = new Set([stem]);
+  if (segments.length > 1 && OUTPUT_DIRS.has(segments[0]!)) {
+    const rest = segments.slice(1).join('/');
+    stems.add(`${prefix}src/${rest}`);
+    // Dropping the output directory from a wildcard path would match the whole package.
+    if (!rest.startsWith('*')) stems.add(`${prefix}${rest}`);
+  }
+  return stems;
+}
+
+/**
+ * Build output laid out in a way we do not know (`distribution/index.js` from
+ * `source/index.ts`, or `dist/types/element/src/*.d.ts` from `src/*`): drop
+ * leading directories of the declared path until what is left exists in the
+ * package, trying it both in place and under each top-level directory.
+ */
+function addMatchesWithoutLeadingDirs(found: Set<string>, segments: string[], prefix: string, sources: Set<string>): void {
+  const firstDirs = new Set<string>(['']);
+  for (const f of sources) {
+    if (!f.startsWith(prefix)) continue;
+    const parts = f.slice(prefix.length).split('/');
+    if (parts.length > 1) firstDirs.add(`${parts[0]}/`);
+  }
+  for (let drop = 1; drop < segments.length && found.size === 0; drop++) {
+    const rest = segments.slice(drop).join('/');
+    if (rest.startsWith('*')) break;
+    for (const dir of firstDirs) {
+      if (drop === 1 && dir === '') continue; // already tried as "output directory removed"
+      addMatches(found, `${prefix}${dir}${rest}`, sources);
+    }
+  }
+}
+
 /**
  * Map a path declared in package.json (often a build output such as
  * `dist/index.js`) back to the source files it most plausibly comes from.
@@ -115,63 +165,13 @@ export function mapToSources(declared: string, pkgDir: string, sources: Set<stri
   const rel = path.posix.normalize(path.posix.join(pkgDir, declared));
   if (rel.startsWith('..')) return [];
   const stem = stripSourceExt(rel);
-
-  const inner = pkgDir === '.' || pkgDir === '' ? stem : stem.slice(pkgDir.length + 1);
-  const prefix = pkgDir === '.' || pkgDir === '' ? '' : `${pkgDir}/`;
-  const segments = inner.split('/');
-  const stems = new Set([stem]);
-  if (segments.length > 1 && OUTPUT_DIRS.has(segments[0]!)) {
-    const rest = segments.slice(1).join('/');
-    stems.add(`${prefix}src/${rest}`);
-    // Dropping the output directory from a wildcard path would match the whole package.
-    if (!rest.startsWith('*')) stems.add(`${prefix}${rest}`);
-  }
+  const atRoot = pkgDir === '.' || pkgDir === '';
+  const prefix = atRoot ? '' : `${pkgDir}/`;
+  const segments = (atRoot ? stem : stem.slice(pkgDir.length + 1)).split('/');
 
   const found = new Set<string>();
-  const lookup = (s: string) => {
-    for (const ext of SOURCE_EXTS) {
-      if (sources.has(s + ext)) found.add(s + ext);
-      if (sources.has(`${s}/index${ext}`)) found.add(`${s}/index${ext}`);
-    }
-  };
-  for (const s of stems) {
-    if (s.includes('*')) {
-      // In package.json `exports`, `*` matches across directories: "./unsafe/*": "./lib/*"
-      // publishes every file under lib/, however deep.
-      const re = new RegExp(`^${s.replace(/[.+^$()|[\]\\{}?]/g, '\\$&').replace(/\*/g, '.*')}(?:\\.[^/]*)?$`);
-      for (const f of sources) if (re.test(f)) found.add(f);
-      continue;
-    }
-    lookup(s);
-  }
-
-  // Build output laid out in a way we do not know (`distribution/index.js` from
-  // `source/index.ts`, or `dist/types/element/src/*.d.ts` from `src/*`): drop
-  // leading directories of the declared path until what is left exists in the
-  // package, trying it both in place and under each top-level directory.
-  if (found.size === 0 && segments.length > 1) {
-    const firstDirs = new Set<string>(['']);
-    for (const f of sources) {
-      if (!f.startsWith(prefix)) continue;
-      const parts = f.slice(prefix.length).split('/');
-      if (parts.length > 1) firstDirs.add(`${parts[0]}/`);
-    }
-    for (let drop = 1; drop < segments.length && found.size === 0; drop++) {
-      const rest = segments.slice(drop).join('/');
-      if (rest.startsWith('*')) break;
-      for (const dir of firstDirs) {
-        if (drop === 1 && dir === '') continue; // already tried above as "output directory removed"
-        const candidate = `${prefix}${dir}${rest}`;
-        if (candidate.includes('*')) {
-          const re = new RegExp(`^${candidate.replace(/[.+^$()|[\]\\{}?]/g, '\\$&').replace(/\*/g, '.*')}(?:\\.[^/]*)?$`);
-          for (const f of sources) if (re.test(f)) found.add(f);
-        } else {
-          lookup(candidate);
-        }
-      }
-    }
-  }
-
+  for (const s of sourceStems(stem, prefix, segments)) addMatches(found, s, sources);
+  if (found.size === 0 && segments.length > 1) addMatchesWithoutLeadingDirs(found, segments, prefix, sources);
   // A wildcard that still matches nothing we can name publishes files we cannot
   // tell apart from the rest, so the whole package is treated as public.
   if (found.size === 0 && stem.includes('*')) {
