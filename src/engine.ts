@@ -83,29 +83,10 @@ function commitMessage(cat: Category, items: CleanupItem[], verify: string[]): s
 export async function runJanitor(options: RunOptions): Promise<RunReport> {
   const root = fs.realpathSync(options.root);
   const config = options.config ?? structuredClone(DEFAULT_CONFIG);
-  const log = options.log ?? (() => {});
   const git = new Git(root);
-  const ctx: JanitorContext = { root, git, config, log };
-  const verify = options.verify;
-  const proposeOnly = new Set(options.proposeOnly ?? []);
-  const timeoutMs = config.verifyTimeoutSec * 1000;
+  const ctx: JanitorContext = { root, git, config, log: options.log ?? (() => {}) };
 
-  if (!(await git.isRepo())) throw new JanitorError('not-a-repo', `${root} is not a git repository`);
-  if (!options.dryRun && (await git.hasChanges())) {
-    const paths = await git.changedPaths();
-    const shown = paths.slice(0, 8).join(', ') + (paths.length > 8 ? `, and ${paths.length - 8} more` : '');
-    throw new JanitorError(
-      'dirty-tree',
-      `working tree has uncommitted or untracked changes (${shown}); commit, stash or ignore them first`,
-    );
-  }
-  if (verify.length === 0 && !options.allowUnverified && !options.dryRun) {
-    throw new JanitorError(
-      'no-verify',
-      'no test, build or typecheck command found; pass --verify "<command>" (or --allow-unverified to proceed with no safety net)',
-    );
-  }
-
+  await refuseUnlessReady(git, root, options);
   const baseSha = await git.head();
   const date = options.date ?? todayUtc();
   const report: RunReport = {
@@ -116,169 +97,240 @@ export async function runJanitor(options: RunOptions): Promise<RunReport> {
     headSha: baseSha,
     dryRun: Boolean(options.dryRun),
     changed: false,
-    verifyCommands: verify,
+    verifyCommands: options.verify,
     baseline: [],
     verifyRuns: 0,
     steps: [],
     notes: [],
   };
+  const loop = new SafeApply(ctx, report, new Set(options.proposeOnly ?? []));
 
-  const record = (cat: Category, items: CleanupItem[], rest: Omit<StepRecord, 'category' | 'title' | 'countsAsDeadCode' | 'items'>) => {
-    report.steps.push({
+  if (options.dryRun) {
+    for (const cat of options.categories) await loop.plan(cat);
+    return report;
+  }
+
+  await loop.start();
+  try {
+    for (const cat of options.categories) await loop.clean(cat);
+  } catch (err) {
+    // Unexpected failure (git itself, disk, ...): leave a clean tree at the last verified commit.
+    await loop.restoreLastGood().catch(() => {});
+    throw err;
+  }
+  await loop.finish();
+  return report;
+}
+
+/** Step 1 of the loop, the part that needs nothing run: is this a repository, is it clean, is there a safety net? */
+async function refuseUnlessReady(git: Git, root: string, options: RunOptions): Promise<void> {
+  if (!(await git.isRepo())) throw new JanitorError('not-a-repo', `${root} is not a git repository`);
+  if (!options.dryRun && (await git.hasChanges())) {
+    const paths = await git.changedPaths();
+    const shown = paths.slice(0, 8).join(', ') + (paths.length > 8 ? `, and ${paths.length - 8} more` : '');
+    throw new JanitorError(
+      'dirty-tree',
+      `working tree has uncommitted or untracked changes (${shown}); commit, stash or ignore them first`,
+    );
+  }
+  if (options.verify.length === 0 && !options.allowUnverified && !options.dryRun) {
+    throw new JanitorError(
+      'no-verify',
+      'no test, build or typecheck command found; pass --verify "<command>" (or --allow-unverified to proceed with no safety net)',
+    );
+  }
+}
+
+// A change that cannot even be made (the package manager's own command fails, say) usually
+// fails the same way for every item. Two single items in a row is enough evidence to stop.
+const APPLY_FAILURE_LIMIT = 2;
+
+type StepOutcome = Omit<StepRecord, 'category' | 'title' | 'countsAsDeadCode' | 'items'>;
+
+/** One run of the loop: the report being written, and the last commit known to pass verification. */
+class SafeApply {
+  private lastGood: string;
+  private readonly applyFailures = new Map<string, number>();
+  private readonly git: Git;
+  private readonly timeoutMs: number;
+
+  constructor(
+    private readonly ctx: JanitorContext,
+    private readonly report: RunReport,
+    private readonly proposeOnly: Set<string>,
+  ) {
+    this.git = ctx.git;
+    this.lastGood = report.baseSha;
+    this.timeoutMs = ctx.config.verifyTimeoutSec * 1000;
+  }
+
+  /** Dry run: record what a category would try. */
+  async plan(cat: Category): Promise<void> {
+    const items = await this.scan(cat);
+    if (items.length) this.record(cat, items, { status: 'planned', proposeOnly: this.proposeOnly.has(cat.name) });
+  }
+
+  /** Verify the untouched tree, then move to a fresh branch. */
+  async start(): Promise<void> {
+    const { report, git } = this;
+    this.ctx.log('running baseline verification on the untouched tree');
+    const baseline = await runVerify(report.verifyCommands, this.ctx.root, this.timeoutMs);
+    report.baseline = baseline.results;
+    if (!baseline.ok) {
+      const f = baseline.failed!;
+      throw new JanitorError(
+        'baseline-failed',
+        `baseline verification failed before any cleanup: \`${f.command}\` ${f.timedOut ? 'timed out' : `exited ${f.exitCode}`}`,
+        f.outputTail,
+      );
+    }
+    // A suite that writes untracked files would make every later step look dirty.
+    if (await git.hasChanges()) await git.restore(report.baseSha);
+
+    if (await git.branchExists(report.branch)) {
+      throw new JanitorError('branch-exists', `branch ${report.branch} already exists; delete it or pass a different --date`);
+    }
+    await git.createBranch(report.branch);
+  }
+
+  /** Scan one category and work through what it found. */
+  async clean(cat: Category): Promise<void> {
+    const items = await this.scan(cat);
+    // Scans are read-only by contract; enforce it rather than trust it.
+    if (await this.git.hasChanges()) await this.restoreLastGood();
+    if (items.length) await this.processGroup(cat, items);
+  }
+
+  restoreLastGood(): Promise<void> {
+    return this.git.restore(this.lastGood);
+  }
+
+  async finish(): Promise<void> {
+    const { report } = this;
+    report.headSha = this.lastGood;
+    report.changed = this.lastGood !== report.baseSha;
+    if (!report.changed) {
+      // Nothing survived verification: do not leave an empty branch behind.
+      await this.git.checkout(report.originalRef);
+      await this.git.deleteBranch(report.branch);
+    }
+  }
+
+  private record(cat: Category, items: CleanupItem[], outcome: StepOutcome): void {
+    this.report.steps.push({
       category: cat.name,
       title: cat.title,
       countsAsDeadCode: cat.countsAsDeadCode,
       items: items.map((i) => ({ id: i.id, description: i.description, ...(i.paths ? { paths: i.paths } : {}) })),
-      ...rest,
+      ...outcome,
     });
-  };
+  }
 
-  const scan = async (cat: Category) => {
+  private async scan(cat: Category): Promise<CleanupItem[]> {
+    const { log } = this.ctx;
     log(`[${cat.name}] scanning`);
     try {
-      const result = await cat.scan(ctx);
-      for (const note of result.notes) report.notes.push({ category: cat.name, note });
+      const result = await cat.scan(this.ctx);
+      for (const note of result.notes) this.report.notes.push({ category: cat.name, note });
       log(`[${cat.name}] ${result.items.length} candidate(s)`);
       return result.items;
     } catch (err) {
-      report.notes.push({ category: cat.name, note: `Scan failed and the category was skipped: ${(err as Error).message}` });
+      this.report.notes.push({ category: cat.name, note: `Scan failed and the category was skipped: ${(err as Error).message}` });
       return [];
     }
-  };
+  }
 
-  if (options.dryRun) {
-    for (const cat of options.categories) {
-      const items = await scan(cat);
-      if (items.length) record(cat, items, { status: 'planned', proposeOnly: proposeOnly.has(cat.name) });
+  private async revert(cat: Category): Promise<void> {
+    await this.restoreLastGood();
+    if (cat.afterRevert) await cat.afterRevert(this.ctx);
+  }
+
+  /** Why a group will not even be tried, if there is a reason. */
+  private skipReason(cat: Category): string | undefined {
+    const { maxVerifyRuns } = this.ctx.config;
+    if ((this.applyFailures.get(cat.name) ?? 0) >= APPLY_FAILURE_LIMIT) {
+      return `the ${APPLY_FAILURE_LIMIT} before could not be applied at all, so the rest were not tried`;
     }
-    return report;
+    if (this.report.verifyRuns >= maxVerifyRuns) return `verification budget of ${maxVerifyRuns} runs exhausted`;
+    return undefined;
   }
 
-  log('running baseline verification on the untouched tree');
-  const baseline = await runVerify(verify, root, timeoutMs);
-  report.baseline = baseline.results;
-  if (!baseline.ok) {
-    const f = baseline.failed!;
-    throw new JanitorError(
-      'baseline-failed',
-      `baseline verification failed before any cleanup: \`${f.command}\` ${f.timedOut ? 'timed out' : `exited ${f.exitCode}`}`,
-      f.outputTail,
-    );
+  /** Make the changes. Returns what went wrong when one of them could not be made. */
+  private async applyItems(cat: Category, items: CleanupItem[]): Promise<StepFailure | undefined> {
+    try {
+      for (const item of items) await item.apply(this.ctx);
+    } catch (err) {
+      if (items.length === 1) this.applyFailures.set(cat.name, (this.applyFailures.get(cat.name) ?? 0) + 1);
+      return { command: '(apply)', exitCode: -1, timedOut: false, outputTail: err instanceof Error ? err.message : String(err) };
+    }
+    this.applyFailures.delete(cat.name);
+    return undefined;
   }
-  // A suite that writes untracked files would make every later step look dirty.
-  if (await git.hasChanges()) await git.restore(baseSha);
 
-  if (await git.branchExists(report.branch)) {
-    throw new JanitorError('branch-exists', `branch ${report.branch} already exists; delete it or pass a different --date`);
+  /** Verify the applied changes and keep, propose or drop them. Returns the failed check when they must be reverted. */
+  private async settle(cat: Category, items: CleanupItem[]): Promise<StepFailure | undefined> {
+    const { git, report } = this;
+    const { log } = this.ctx;
+    // Stage the step now, so that anything the verification suite writes
+    // (coverage, build output, updated snapshots) can never end up in the commit.
+    if (!(await git.stageAll())) {
+      this.record(cat, items, { status: 'noop' });
+      log(`[${cat.name}] ${items.length} item(s) changed nothing; skipped`);
+      return undefined;
+    }
+    report.verifyRuns++;
+    log(`[${cat.name}] verifying ${items.length} item(s)`);
+    const result = await runVerify(report.verifyCommands, this.ctx.root, this.timeoutMs);
+    if (!result.ok) {
+      const f = result.failed!;
+      return { command: f.command, exitCode: f.exitCode, timedOut: f.timedOut, outputTail: f.outputTail };
+    }
+    if (this.proposeOnly.has(cat.name)) {
+      // The project passes without these, which is worth telling a reviewer; acting on it is their call.
+      await this.revert(cat);
+      this.record(cat, items, { status: 'proposed' });
+      log(`[${cat.name}] ${items.length} item(s) pass the checks when removed; proposed, not applied`);
+      return undefined;
+    }
+    const sha = await git.commitStaged(commitMessage(cat, items, report.verifyCommands));
+    if (await git.hasChanges()) await git.restore(sha);
+    const stats = await git.diffStats(this.lastGood, sha);
+    this.lastGood = sha;
+    this.record(cat, items, { status: 'kept', sha, stats });
+    log(`[${cat.name}] kept ${items.length} item(s) as ${sha.slice(0, 9)}`);
+    return undefined;
   }
-  await git.createBranch(report.branch);
-
-  let lastGood = baseSha;
-
-  const revert = async (cat: Category) => {
-    await git.restore(lastGood);
-    if (cat.afterRevert) await cat.afterRevert(ctx);
-  };
-
-  // A change that cannot even be made (the package manager's own command fails, say) usually
-  // fails the same way for every item. Two single items in a row is enough evidence to stop.
-  const APPLY_FAILURE_LIMIT = 2;
-  const applyFailures = new Map<string, number>();
 
   /** Resolves to true when every item ended up kept, proposed or a no-op. */
-  const processGroup = async (cat: Category, items: CleanupItem[]): Promise<boolean> => {
-    if ((applyFailures.get(cat.name) ?? 0) >= APPLY_FAILURE_LIMIT) {
-      record(cat, items, {
-        status: 'skipped',
-        reason: `the ${APPLY_FAILURE_LIMIT} before could not be applied at all, so the rest were not tried`,
-      });
+  private async processGroup(cat: Category, items: CleanupItem[]): Promise<boolean> {
+    const reason = this.skipReason(cat);
+    if (reason) {
+      this.record(cat, items, { status: 'skipped', reason });
       return false;
     }
-    if (report.verifyRuns >= config.maxVerifyRuns) {
-      record(cat, items, { status: 'skipped', reason: `verification budget of ${config.maxVerifyRuns} runs exhausted` });
-      return false;
-    }
+    const failure = (await this.applyItems(cat, items)) ?? (await this.settle(cat, items));
+    if (!failure) return true;
 
-    let failure: StepFailure | undefined;
-    try {
-      for (const item of items) await item.apply(ctx);
-    } catch (err) {
-      failure = { command: '(apply)', exitCode: -1, timedOut: false, outputTail: err instanceof Error ? err.message : String(err) };
-    }
-
-    if (failure && items.length === 1) applyFailures.set(cat.name, (applyFailures.get(cat.name) ?? 0) + 1);
-    if (!failure) {
-      applyFailures.delete(cat.name);
-      // Stage the step now, so that anything the verification suite writes
-      // (coverage, build output, updated snapshots) can never end up in the commit.
-      if (!(await git.stageAll())) {
-        record(cat, items, { status: 'noop' });
-        log(`[${cat.name}] ${items.length} item(s) changed nothing; skipped`);
-        return true;
-      }
-      report.verifyRuns++;
-      log(`[${cat.name}] verifying ${items.length} item(s)`);
-      const result = await runVerify(verify, root, timeoutMs);
-      if (result.ok && proposeOnly.has(cat.name)) {
-        // The project passes without these, which is worth telling a reviewer; acting on it is their call.
-        await revert(cat);
-        record(cat, items, { status: 'proposed' });
-        log(`[${cat.name}] ${items.length} item(s) pass the checks when removed; proposed, not applied`);
-        return true;
-      }
-      if (result.ok) {
-        const sha = await git.commitStaged(commitMessage(cat, items, verify));
-        if (await git.hasChanges()) await git.restore(sha);
-        const stats = await git.diffStats(lastGood, sha);
-        lastGood = sha;
-        record(cat, items, { status: 'kept', sha, stats });
-        log(`[${cat.name}] kept ${items.length} item(s) as ${sha.slice(0, 9)}`);
-        return true;
-      }
-      const f = result.failed!;
-      failure = { command: f.command, exitCode: f.exitCode, timedOut: f.timedOut, outputTail: f.outputTail };
-    }
-
-    await revert(cat);
-    log(`[${cat.name}] reverted ${items.length} item(s): ${failure.command} failed`);
-
-    if (items.length > 1 && config.bisect) {
-      const mid = Math.ceil(items.length / 2);
-      const first = await processGroup(cat, items.slice(0, mid));
-      const second = await processGroup(cat, items.slice(mid));
-      if (first && second && failure.command !== '(apply)') {
-        // Together they failed, apart they all passed. Changes can interact, but far more
-        // often this is a check that does not give the same answer twice.
-        report.notes.push({
-          category: cat.name,
-          note: `\`${failure.command}\` failed on ${items.length} changes together, then passed on every one of them separately. That usually means the check is flaky. The changes were kept because each passed, so give them a second look.`,
-        });
-      }
-      return first && second;
-    }
-    record(cat, items, { status: 'reverted', failure });
+    await this.revert(cat);
+    this.ctx.log(`[${cat.name}] reverted ${items.length} item(s): ${failure.command} failed`);
+    if (items.length > 1 && this.ctx.config.bisect) return this.bisect(cat, items, failure);
+    this.record(cat, items, { status: 'reverted', failure });
     return false;
-  };
+  }
 
-  try {
-    for (const cat of options.categories) {
-      const items = await scan(cat);
-      // Scans are read-only by contract; enforce it rather than trust it.
-      if (await git.hasChanges()) await git.restore(lastGood);
-      if (items.length) await processGroup(cat, items);
+  /** A group failed: try its halves, so one bad item cannot sink the rest. */
+  private async bisect(cat: Category, items: CleanupItem[], failure: StepFailure): Promise<boolean> {
+    const mid = Math.ceil(items.length / 2);
+    const first = await this.processGroup(cat, items.slice(0, mid));
+    const second = await this.processGroup(cat, items.slice(mid));
+    if (first && second && failure.command !== '(apply)') {
+      // Together they failed, apart they all passed. Changes can interact, but far more
+      // often this is a check that does not give the same answer twice.
+      this.report.notes.push({
+        category: cat.name,
+        note: `\`${failure.command}\` failed on ${items.length} changes together, then passed on every one of them separately. That usually means the check is flaky. The changes were kept because each passed, so give them a second look.`,
+      });
     }
-  } catch (err) {
-    // Unexpected failure (git itself, disk, ...): leave a clean tree at the last verified commit.
-    await git.restore(lastGood).catch(() => {});
-    throw err;
+    return first && second;
   }
-
-  report.headSha = lastGood;
-  report.changed = lastGood !== baseSha;
-  if (!report.changed) {
-    // Nothing survived verification: do not leave an empty branch behind.
-    await git.checkout(report.originalRef);
-    await git.deleteBranch(report.branch);
-  }
-  return report;
 }
