@@ -170,6 +170,7 @@ async function snapEdits(src: string, repo: string, snap: Snap): Promise<void> {
     }
     const names = [...bound];
     const half = new Set(names.filter(() => rng.chance(0.5)));
+    const others = [0, 1, 2].map(() => new Set(names.filter(() => rng.chance(0.5))));
     const importsOnly = imports.map((stmt) => text.slice(stmt.getFullStart(), stmt.end)).join('') + '\n';
     const usesHalf = `${importsOnly}\nconsole.log(${names.filter((n) => !half.has(n)).join(', ')});\n`;
     const tidied = [
@@ -179,6 +180,7 @@ async function snapEdits(src: string, repo: string, snap: Snap): Promise<void> {
       tidyImports(usesHalf, abs, new Set(names)),
       tidyImports(importsOnly.replace(/\n/g, '\r\n'), abs, half),
       tidyImports(importsOnly, abs, new Set()),
+      ...others.map((unused) => tidyImports(`${importsOnly}\nconsole.log(${names.filter((n) => !unused.has(n)).join(', ')});\n`, abs, new Set(names))),
     ];
     snap[`edits/${name}/${file}`] = digest([removals, tidied]);
   }
@@ -220,6 +222,7 @@ const SHAPES: Record<string, string> = {
   'src/index.ts': "import def, { a as renamed, type T } from './named';\nimport * as ns from './ns';\nimport './side-effect';\nexport * from './reexported';\nexport { x as y } from './picked';\nimport legacy = require('./legacy');\nexport const used = [def, renamed, ns, legacy];\nexport type U = T;\n",
   'src/named.ts': 'export default 1;\nexport const a = 1;\nexport type T = string;\nexport const unusedConst = { a: 1, b: [2, -3], c: () => 4 };\nexport let sideEffect = compute();\nexport function unusedFn() {}\nexport class Plain { static n = 1; m() {} }\nexport class Impure { static n = compute(); }\nexport enum E { A }\nexport interface Merged { a: 1 }\nexport namespace Merged { export const b = 2; }\nexport const [d1, d2] = [1, 2];\nfunction compute() { return 1; }\n',
   'src/ns.ts': 'export const one = 1;\nexport const two = 2;\n',
+  'src/mixed-imports.ts': "import def, * as ns from './named';\nimport type { T } from './named';\nimport other, { a, type T as T2 } from './named';\nimport {\n  a as a2,\n  unusedConst,\n} from './named';\nimport * as only from './ns';\nimport solo from './named'\nexport const all = [def, ns, other, a, a2, unusedConst, only, solo];\nexport type TT = [T, T2];\n",
   // Committed with the fixed date the check uses, so every flag here is months old.
   'flags.json': JSON.stringify({ $schema: 'x', version: 2, 'never-used': true, 'on-for-good': { enabled: true }, 'full-rollout': { rollout: 100 },
     'half-rollout': { percentage: 50 }, 'switched-off': { on: false, rollout: 100 }, 'plain-on': true, 'camelCased-flag': true, '_private': true }, null, 2) + '\n',
