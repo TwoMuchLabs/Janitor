@@ -52,7 +52,12 @@ export const deadFiles: Category = {
         scripts.push(file);
       }
     }
-    const live = reachableFrom(project.graph, [...project.entryPoints.entries, ...heldBack, ...scripts]);
+    const live = reachableFrom(project.graph, [
+      ...project.entryPoints.entries,
+      ...project.graph.components.flatMap((c) => [...c.edges.keys()]),
+      ...heldBack,
+      ...scripts,
+    ]);
     const dead = project.sources.filter((file) => !live.has(file));
     const deadSet = new Set(dead);
 

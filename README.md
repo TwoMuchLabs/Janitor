@@ -126,15 +126,19 @@ It is deliberately biased towards leaving things alone:
   script arguments, mapped from the build directory back to source), from scripts an
   HTML page loads, and from the framework in use: Next.js, SvelteKit, Remix / React
   Router, Nuxt, Astro, Expo Router, React Native, Gatsby, NestJS, Angular, Docusaurus,
-  VitePress and Storybook each contribute their route and entry files. Tests, fixtures, `*.config.*`, dotfiles and
-  `scripts/` always count as used.
+  VitePress and Storybook each contribute their route and entry files. Tests, fixtures, mock folders, `*.config.*`, dotfiles
+  and `scripts/` always count as used.
 - Any relative-path string that resolves to a source file counts as a use
   (`jest.mock('./x')`, `new Worker('./x.js')`, `new URL('./x.js', import.meta.url)`).
 - ``import(`./locales/${lang}.js`)`` protects everything under `./locales/`; a fully
   dynamic `import(x)` / `require(x)` protects the importing file's directory.
 - Files loaded by pattern or by listing a directory are kept: `import.meta.glob('./modules/*.ts')`,
   `require.context('./icons')`, `requireDirectory(__dirname)`, `fs.readdirSync(path.join(__dirname, 'tasks'))`.
-- A file named in any non-code file (Dockerfile, workflow YAML, HTML, `.vue`, ...) or in the
+- Vue, Svelte and Astro components are read for what they import, by name, and are always
+  treated as in use. They are never edited or deleted themselves.
+- In a project with automatic imports (Nuxt, unplugin-auto-import, unimport), an export
+  whose name appears in any other file is kept, since it can be used there with no import.
+- A file named in any non-code file (Dockerfile, workflow YAML, HTML, ...) or in the
   docs is kept, and an export whose name appears in a non-code file is kept.
 - A file that nothing imports and that exports nothing is treated as a script someone runs
   by hand (`node tools/report.mjs`). It is listed in the PR, never deleted.
@@ -305,18 +309,22 @@ export const removeTodoFiles: Category = {
 ## How it has been tested
 
 Besides its unit tests, Janitor has been dry-run on its own code, on four Two Much Labs
-repositories and on fifteen public projects of different shapes:
+repositories and on twenty-two public projects of different shapes:
 
 | Shape | Projects |
 |---|---|
 | Libraries | express, commander.js, axios, ky, uuid, yup, fastify |
 | Monorepos | zod (pnpm), excalidraw (Yarn 1 workspaces) |
-| Framework apps | vercel/commerce (Next.js), sveltejs/realworld (SvelteKit), nuxt/movies (Nuxt), vitesse (Vue + Vite), a React Native / Expo template |
+| React and React Native apps | vercel/commerce (Next.js), a React Native / Expo template |
+| Vue and Nuxt apps | nuxt/movies, elk (Nuxt 4), vitesse, vue-pure-admin |
+| Svelte apps | sveltejs/realworld, learn.svelte.dev (SvelteKit) |
+| Angular and NestJS | angular-realworld-example-app, nestjs-realworld-example-app |
+| Services and tools | pm2 (CommonJS), pocketbase's admin UI (run from a sub-folder) |
 | Large application | outline (about 2,500 source files, scanned in a few seconds) |
 
 Nothing was sent to those projects.
 
-Those runs are where most of the rules above came from. Ten times it proposed
+Those runs are where most of the rules above came from. Thirteen times it proposed
 something the project's own tests would probably not have caught:
 
 - scripts run by hand (a lab repo)
@@ -329,10 +337,13 @@ something the project's own tests would probably not have caught:
 - modules loaded by `import.meta.glob` (vitesse)
 - thirty queue processors and tasks loaded by listing their directory (outline)
 - a documentation theme override (excalidraw)
+- types used through Nuxt's automatic imports, with no import statement (elk)
+- files imported only from Vue components (vue-pure-admin)
+- mock-server files loaded by folder convention (vue-pure-admin)
 
 Each is now a rule with a regression test. Where its remaining findings were checked
-by hand (ky, vercel/commerce, the React Native template, Sarvavox, and samples from
-outline, excalidraw and yup) they were correct.
+by hand (ky, vercel/commerce, the React Native template, Sarvavox, elk, and samples
+from outline, excalidraw, yup and vue-pure-admin) they were correct.
 
 Most of this was dry runs checked by hand. Its changes have also been run through a
 project's own checks on six codebases:
@@ -350,8 +361,9 @@ These were run in a sandbox without a browser or open network access, so browser
 tests, and test files or builds that fetch from the network, were left out. None of
 the six is a full run of a project's complete suite except Sarvavox.
 
-Nineteen codebases is still a small sample: treat its pull requests as proposals to
-review, not as changes to merge unread.
+Twenty-six codebases is still a small sample, and new shapes kept turning up new
+mistakes to the end: treat its pull requests as proposals to review, not as changes
+to merge unread.
 
 ## Limitations (v0.1)
 
@@ -377,7 +389,7 @@ review, not as changes to merge unread.
 ```bash
 npm ci
 npm run typecheck
-npm test          # 59 tests; the engine suite drives real temporary git repositories
+npm test          # 61 tests; the engine suite drives real temporary git repositories
 npm run build
 ```
 

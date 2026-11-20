@@ -145,7 +145,7 @@ export const unusedExports: Category = {
       };
     }
     const used = new Map<string, Set<string>>();
-    for (const mod of project.graph.modules.values()) {
+    for (const mod of [...project.graph.modules.values(), ...project.graph.components]) {
       for (const [target, names] of mod.edges) {
         let set = used.get(target);
         if (!set) used.set(target, (set = new Set()));
@@ -164,6 +164,8 @@ export const unusedExports: Category = {
       const seen = new Set<string>();
       for (const exp of mod.exports) {
         if (seen.has(exp.name) || importedNames.has(exp.name) || project.mentions.identifiers.has(exp.name)) continue;
+        // With automatic imports, a name another file mentions may be used there without importing it.
+        if (project.entryPoints.autoImports && (project.mentions.sourceFileCounts.get(exp.name) ?? 0) > 1) continue;
         // `interface X` merged with `namespace X` must stay exported together.
         if (mod.namespaces.has(exp.name)) continue;
         seen.add(exp.name);

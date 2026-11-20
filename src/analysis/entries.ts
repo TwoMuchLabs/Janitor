@@ -22,7 +22,7 @@ const CONVENTION_ENTRY_GLOBS = [
   '**/*.test-d.*',
   '**/test-d/**',
   // sample inputs that test runners and compilers read from disk rather than import
-  '**/{fixtures,fixture,__fixtures__,testdata,test-data,stubs,mocks,snapshots,__snapshots__}/**',
+  '**/{fixtures,fixture,__fixtures__,testdata,test-data,stubs,mock,mocks,snapshots,__snapshots__}/**',
   '**/{samples,templates,template,playground,sandbox,demo,demos}/**',
   // tooling and configuration
   '**/*.config.*',
@@ -72,7 +72,7 @@ const FRAMEWORK_ROOTS: { deps: string[]; globs: string[] }[] = [
   { deps: ['@remix-run/react', '@remix-run/node', '@react-router/dev'], globs: ['app/routes/**', 'app/{root,entry,routes}*.*'] },
   {
     deps: ['nuxt'],
-    globs: ['{pages,app,server,plugins,middleware,layouts,composables,components,utils}/**', 'app.*', 'nuxt.config.*'],
+    globs: ['{pages,app,server,plugins,middleware,layouts,composables,components,utils,shared,modules,stores,layers}/**', 'app.*', 'nuxt.config.*'],
   },
   { deps: ['astro'], globs: ['src/pages/**', 'src/middleware.*', 'src/content/config.*', 'src/content.config.*', 'astro.config.*'] },
   { deps: ['expo-router'], globs: ['app/**', 'src/app/**'] },
@@ -86,6 +86,12 @@ const FRAMEWORK_ROOTS: { deps: string[]; globs: string[] }[] = [
   { deps: ['vitepress'], globs: ['.vitepress/**', '**/.vitepress/**'] },
   { deps: ['@storybook/react', 'storybook'], globs: ['.storybook/**'] },
 ];
+
+/**
+ * Tools that make exports available everywhere without an import statement.
+ * In such a project "nobody imports it" does not mean "nobody uses it".
+ */
+const AUTO_IMPORT_DEPS = ['nuxt', 'nuxt3', '@nuxt/kit', 'nitropack', 'unplugin-auto-import', 'unimport', 'unplugin-vue-components'];
 
 const HTML_SCRIPT = /<script\b[^>]*\bsrc\s*=\s*["']([^"'?#]+)/gi;
 
@@ -179,12 +185,15 @@ export interface EntryPoints {
   entries: Set<string>;
   /** Number of genuine program roots (package.json, conventions, user config). Zero means "do not trust reachability". */
   roots: number;
+  /** Whether the project uses a tool that injects imports automatically (Nuxt, unplugin-auto-import, ...). */
+  autoImports: boolean;
 }
 
 export function findEntryPoints(root: string, tracked: string[], sources: string[], userGlobs: string[]): EntryPoints {
   const sourceSet = new Set(sources);
   const entries = new Set<string>();
   let roots = 0;
+  let autoImports = false;
 
   const addRoot = (file: string) => {
     if (!entries.has(file)) roots++;
@@ -216,6 +225,7 @@ export function findEntryPoints(root: string, tracked: string[], sources: string
     for (const key of ['dependencies', 'devDependencies', 'peerDependencies']) {
       if (pkg[key] && typeof pkg[key] === 'object') for (const name of Object.keys(pkg[key] as object)) deps.add(name);
     }
+    if (AUTO_IMPORT_DEPS.some((d) => deps.has(d))) autoImports = true;
     const prefix = pkgDir === '.' ? '' : `${pkgDir}/`;
     for (const framework of FRAMEWORK_ROOTS) {
       if (!framework.deps.some((d) => deps.has(d))) continue;
@@ -248,5 +258,5 @@ export function findEntryPoints(root: string, tracked: string[], sources: string
     if (isUser(f) || isRootConvention(f)) addRoot(f);
     else if (isConvention(f)) entries.add(f);
   }
-  return { entries, roots };
+  return { entries, roots, autoImports };
 }

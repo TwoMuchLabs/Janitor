@@ -446,3 +446,45 @@ test('a file that satisfied the formatter is re-formatted after an edit; others 
   assert.equal(read(root, 'src/tidy.ts'), `export const a = 1;\n// formatted\n`);
   assert.equal(read(root, 'src/messy.ts'), `export const b = 1;\n`);
 });
+
+test('with automatic imports, a name another file uses without importing it is not unused', async () => {
+  const files = {
+    'package.json': JSON.stringify({ name: 'app', dependencies: { nuxt: '4.0.0' } }),
+    'app/pages/index.vue': `<script setup lang="ts">const p = usePaginator()</script>\n`,
+    'app/composables/paginator.ts': `export function usePaginator(): PaginatorState { return 'idle'; }\n`,
+    'config/env.ts': `import './types';\nexport const isPR = false;\nexport const gitBranch = isPR ? 'a' : 'b';\nconsole.log(gitBranch);\n`,
+    'config/types.ts': `export type PaginatorState = 'idle' | 'loading';\nexport type NeverMentioned = 1;\n`,
+    'nuxt.config.ts': `import './config/env';\nexport default {};\n`,
+  };
+  const nuxt = await unusedExports.scan(context(makeRepo(files)));
+  // PaginatorState is used in paginator.ts with no import; isPR and gitBranch only in their own file.
+  assert.deepEqual(ids(nuxt.items), [
+    'unused-export:config/env.ts#gitBranch',
+    'unused-export:config/env.ts#isPR',
+    'unused-export:config/types.ts#NeverMentioned',
+  ]);
+
+  // The same code without an auto-import tool: an unimported mention proves nothing.
+  const plain = { ...files, 'package.json': JSON.stringify({ name: 'app', main: 'nuxt.config.ts' }) };
+  assert.ok(ids((await unusedExports.scan(context(makeRepo(plain)))).items).includes('unused-export:config/types.ts#PaginatorState'));
+});
+
+test('imports made by single-file components count, by name', async () => {
+  const root = makeRepo({
+    'package.json': JSON.stringify({ name: 'spa', devDependencies: { vite: '6.0.0' } }),
+    'index.html': `<script type="module" src="/src/main.ts"></script>\n`,
+    'src/main.ts': `import App from './App.vue';\nconsole.log(App);\n`,
+    'src/App.vue': `<template><Flip /></template>\n<script setup lang="ts">\nimport { animates } from './animate';\nimport Flip from './widgets/Flip.svelte';\n</script>\n`,
+    // imported only from a component, with a same-folder path
+    'src/animate.ts': `export const animates = ['fade'];\nexport const leftover = 1;\n`,
+    'src/widgets/Flip.svelte': `<script context="module">\n  import { flipper } from './flipper';\n</script>\n<div>{flipper}</div>\n`,
+    'src/widgets/flipper.ts': `export const flipper = 1;\n`,
+    'src/pages/Home.astro': `---\nimport { title } from '../site';\n---\n<h1>{title}</h1>\n`,
+    'src/site.ts': `export const title = 'x';\n`,
+    'src/forgotten.ts': `export const f = 1;\n`,
+    // loaded by a mock-server plugin by folder convention
+    'mock/login.ts': `export default [];\n`,
+  });
+  assert.deepEqual(ids((await deadFiles.scan(context(root))).items), ['dead-file:src/forgotten.ts']);
+  assert.deepEqual(ids((await unusedExports.scan(context(root))).items), ['unused-export:src/animate.ts#leftover']);
+});

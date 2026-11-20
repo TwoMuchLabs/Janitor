@@ -19,6 +19,12 @@ interface Mentions {
   pairs: Set<string>;
   /** Identifier-like words in non-source files. */
   identifiers: Set<string>;
+  /**
+   * For projects with automatic imports only: how many source files mention
+   * each identifier-like word. A name seen in more than its own file may be
+   * used there without an import.
+   */
+  sourceFileCounts: Map<string, number>;
 }
 
 interface ProjectAnalysis {
@@ -111,17 +117,25 @@ function findSeparatePackages(root: string, tracked: string[]): string[] {
 export async function analyzeProject(ctx: JanitorContext): Promise<ProjectAnalysis> {
   const tracked = await trackedFiles(ctx);
   const sources = tracked.filter((f) => isSource(f) && !f.includes('node_modules/'));
-  const graph = buildModuleGraph(ctx.root, sources);
+  const componentFiles = tracked.filter((f) => /\.(?:vue|svelte|astro)$/.test(f) && !f.includes('node_modules/'));
+  const graph = buildModuleGraph(ctx.root, sources, componentFiles);
   const entryPoints = findEntryPoints(ctx.root, tracked, sources, ctx.config.entry);
-  const reachable = reachableFrom(graph, entryPoints.entries);
+  // Components are always in use, so whatever they import is reachable.
+  const importedByComponents = graph.components.flatMap((c) => [...c.edges.keys()]);
+  const reachable = reachableFrom(graph, [...entryPoints.entries, ...importedByComponents]);
 
-  const mentions: Mentions = { basenames: new Set(), pairs: new Set(), identifiers: new Set() };
+  const mentions: Mentions = { basenames: new Set(), pairs: new Set(), identifiers: new Set(), sourceFileCounts: new Map() };
   for (const file of tracked) {
     if (isLockfile(file) || /\.(?:map|snap|svg|lock)$/i.test(file)) continue;
     if (isSource(file)) {
-      if (!reachable.has(file)) continue;
       const text = readText(ctx.root, file);
-      if (text) addPathTokens(text, mentions);
+      if (!text) continue;
+      if (entryPoints.autoImports) {
+        for (const id of new Set(text.match(IDENTIFIER) ?? [])) {
+          mentions.sourceFileCounts.set(id, (mentions.sourceFileCounts.get(id) ?? 0) + 1);
+        }
+      }
+      if (reachable.has(file)) addPathTokens(text, mentions);
     } else {
       const text = readText(ctx.root, file);
       if (!text) continue;

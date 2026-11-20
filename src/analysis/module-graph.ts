@@ -31,6 +31,12 @@ interface ModuleNode {
 export interface ModuleGraph {
   modules: Map<string, ModuleNode>;
   /**
+   * Single-file components (`.vue`, `.svelte`, `.astro`). Only their script
+   * blocks are read, and only for what they import: they are never candidates
+   * for cleanup themselves and are always treated as in use.
+   */
+  components: ModuleNode[];
+  /**
    * Directory prefixes that are loaded through non-literal `import()` /
    * `require()` calls. Anything underneath may be used at runtime.
    */
@@ -137,11 +143,26 @@ const COMMONJS_EXPORT = /\bmodule\.exports\b|\bexports\s*(?:\.[A-Za-z_$]|\[)/;
  * namespace import of it (covers `jest.mock('./x')`, `new Worker('./x.js')`,
  * `new URL('./x.js', import.meta.url)` and friends).
  */
-export function buildModuleGraph(root: string, files: string[]): ModuleGraph {
+const SCRIPT_BLOCK = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
+const ASTRO_FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---/;
+
+/** The script source of a single-file component, with everything else dropped. */
+function componentScript(file: string, text: string): string {
+  const blocks = [...text.matchAll(SCRIPT_BLOCK)].map((m) => m[1]!);
+  if (file.endsWith('.astro')) {
+    const frontmatter = ASTRO_FRONTMATTER.exec(text)?.[1];
+    if (frontmatter) blocks.unshift(frontmatter);
+  }
+  return blocks.join('\n;\n');
+}
+
+export function buildModuleGraph(root: string, files: string[], componentFiles: string[] = []): ModuleGraph {
   const options = loadCompilerOptions(root);
   const fileSet = new Set(files);
   const cache = ts.createModuleResolutionCache(root, (f) => f, options);
   const modules = new Map<string, ModuleNode>();
+  const components: ModuleNode[] = [];
+  const componentSet = new Set(componentFiles);
   const dynamicPrefixes = new Set<string>();
 
   const resolve = (spec: string, fromAbs: string): string | null => {
@@ -151,17 +172,22 @@ export function buildModuleGraph(root: string, files: string[]): ModuleGraph {
     return fileSet.has(rel) ? rel : null;
   };
 
-  for (const file of files) {
+  for (const file of [...files, ...componentFiles]) {
     const abs = path.join(root, file);
+    const isComponent = componentSet.has(file);
     let text: string;
     try {
       text = fs.readFileSync(abs, 'utf8');
     } catch {
       continue;
     }
-    const sf = ts.createSourceFile(abs, text, ts.ScriptTarget.Latest, true);
+    if (isComponent) text = componentScript(file, text);
+    const sf = isComponent
+      ? ts.createSourceFile(`${abs}.tsx`, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+      : ts.createSourceFile(abs, text, ts.ScriptTarget.Latest, true);
     const node: ModuleNode = { file, edges: new Map(), exports: [], exportsAnything: COMMONJS_EXPORT.test(text), namespaces: new Set() };
-    modules.set(file, node);
+    if (isComponent) components.push(node);
+    else modules.set(file, node);
     const dir = path.posix.dirname(file);
 
     const add = (spec: string, names: string[]) => {
@@ -269,7 +295,7 @@ export function buildModuleGraph(root: string, files: string[]): ModuleGraph {
     for (const m of text.matchAll(JSDOC_IMPORT)) add(m[1]!, [ALL]);
   }
 
-  return { modules, dynamicPrefixes: [...dynamicPrefixes] };
+  return { modules, components, dynamicPrefixes: [...dynamicPrefixes] };
 }
 
 /** Every module reachable from `entries` by following imports. */
