@@ -74,6 +74,12 @@ export class Git {
     return (await this.run(['status', '--porcelain'])).length > 0;
   }
 
+  /** Paths with staged, unstaged or untracked changes, as `git status` prints them. */
+  async changedPaths(): Promise<string[]> {
+    const out = (await this.raw(['status', '--porcelain'])).stdout;
+    return out.split('\n').filter((line) => line.trim()).map((line) => line.slice(3));
+  }
+
   async branchExists(name: string): Promise<boolean> {
     return (await this.raw(['show-ref', '--verify', '--quiet', `refs/heads/${name}`])).code === 0;
   }

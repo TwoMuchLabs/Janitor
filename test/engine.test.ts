@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { JanitorError, runJanitor } from '../src/engine.js';
+import { renderPrBody } from '../src/report.js';
+import type { CleanupItem } from '../src/types.js';
 import { config, deleteItem, exists, fakeCategory, git, makeRepo, read, write, writeItem } from './helpers.js';
 
 // The "test suite" of the fixture repo: fails if a required file is missing or a poison file exists.
@@ -143,6 +145,7 @@ test('refuses to run on a dirty working tree and changes nothing', async () => {
   write(root, { 'wip.txt': 'uncommitted work' });
   await assert.rejects(run(root, [fakeCategory('a', [deleteItem('junk-a.txt')])]), (err: JanitorError) => {
     assert.equal(err.code, 'dirty-tree');
+    assert.match(err.message, /wip\.txt/, 'the message names the file in the way');
     return true;
   });
   assert.equal(read(root, 'wip.txt'), 'uncommitted work');
@@ -222,6 +225,7 @@ test('a step that changes nothing is recorded as a no-op without running verific
   assert.equal(report.steps[0]!.status, 'noop');
   assert.equal(report.verifyRuns, 0);
   assert.equal(report.changed, false);
+  assert.match(renderPrBody(report), /### Made no difference/, 'a silent no-op looks like a dropped step');
 });
 
 test('calls afterRevert so categories can restore untracked state', async () => {
@@ -296,4 +300,24 @@ test('when everything is only proposed, no branch is left behind', async () => {
   assert.ok(exists(root, 'junk-a.txt'));
   assert.equal(git(root, 'rev-parse', '--abbrev-ref', 'HEAD'), 'main');
   assert.equal(git(root, 'branch', '--list', 'nightly-janitor/*'), '');
+});
+
+test('stops trying a category once single items keep failing to apply', async () => {
+  const root = makeRepo(baseFiles);
+  let attempts = 0;
+  const broken = (id: string): CleanupItem => ({
+    id,
+    description: `update ${id}`,
+    apply: async () => {
+      attempts++;
+      throw new Error('package manager exited 1');
+    },
+  });
+  const items = Array.from({ length: 16 }, (_, i) => broken(`dep-${i}`));
+  const report = await run(root, [fakeCategory('deps', items), fakeCategory('a', [deleteItem('junk-a.txt')])]);
+  assert.ok(attempts <= 6, `gave up after ${attempts} attempts instead of grinding through all 16`);
+  const statuses = report.steps.filter((s) => s.category === 'deps').map((s) => s.status);
+  assert.equal(statuses.filter((s) => s === 'reverted').length, 2);
+  assert.ok(statuses.includes('skipped'));
+  assert.ok(!exists(root, 'junk-a.txt'), 'the next category still runs');
 });

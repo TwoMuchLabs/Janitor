@@ -249,7 +249,10 @@ export const outdatedDeps: Category = {
         : `update \`${u.name}\` ${u.from} -> ${u.to} (${u.kind})`,
       async apply(c) {
         const r = await exec(manager, m.update(u.name), { cwd: c.root, timeoutMs: TIMEOUT_MS });
-        if (r.code !== 0) throw new Error(`${manager} update ${u.name} failed: ${r.stderr.trim() || r.stdout.trim()}`);
+        if (r.code !== 0) {
+          const output = `${r.stdout}\n${r.stderr}`.trim().split('\n').slice(-15).join('\n');
+          throw new Error(`${manager} update ${u.name} failed (exit ${r.code}):\n${output}`);
+        }
       },
     }));
     return { items, notes };

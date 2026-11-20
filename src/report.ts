@@ -184,6 +184,14 @@ export function renderPrBody(report: RunReport): string {
     out.push('', 'To let Janitor delete dead files itself, set `"deadFiles": "apply"` in `.janitor.json`.', '');
   }
 
+  const noop = report.steps.filter((s) => s.status === 'noop');
+  if (noop.length) {
+    out.push('### Made no difference', '');
+    out.push('These were tried and left the repository exactly as it was, so there was nothing to check or commit.', '');
+    for (const step of noop) for (const item of step.items) out.push(`- ${item.description}`);
+    out.push('');
+  }
+
   if (skipped.length) {
     out.push('### Not attempted', '');
     for (const step of skipped) out.push(`- ${step.title}: ${plural(step.items.length, 'item')} (${step.reason})`);

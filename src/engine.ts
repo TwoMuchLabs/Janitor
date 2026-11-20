@@ -92,7 +92,12 @@ export async function runJanitor(options: RunOptions): Promise<RunReport> {
 
   if (!(await git.isRepo())) throw new JanitorError('not-a-repo', `${root} is not a git repository`);
   if (!options.dryRun && (await git.hasChanges())) {
-    throw new JanitorError('dirty-tree', 'working tree has uncommitted or untracked changes; commit or stash them first');
+    const paths = await git.changedPaths();
+    const shown = paths.slice(0, 8).join(', ') + (paths.length > 8 ? `, and ${paths.length - 8} more` : '');
+    throw new JanitorError(
+      'dirty-tree',
+      `working tree has uncommitted or untracked changes (${shown}); commit, stash or ignore them first`,
+    );
   }
   if (verify.length === 0 && !options.allowUnverified && !options.dryRun) {
     throw new JanitorError(
@@ -175,7 +180,19 @@ export async function runJanitor(options: RunOptions): Promise<RunReport> {
     if (cat.afterRevert) await cat.afterRevert(ctx);
   };
 
+  // A change that cannot even be made (the package manager's own command fails, say) usually
+  // fails the same way for every item. Two single items in a row is enough evidence to stop.
+  const APPLY_FAILURE_LIMIT = 2;
+  const applyFailures = new Map<string, number>();
+
   const processGroup = async (cat: Category, items: CleanupItem[]): Promise<void> => {
+    if ((applyFailures.get(cat.name) ?? 0) >= APPLY_FAILURE_LIMIT) {
+      record(cat, items, {
+        status: 'skipped',
+        reason: `the ${APPLY_FAILURE_LIMIT} before could not be applied at all, so the rest were not tried`,
+      });
+      return;
+    }
     if (report.verifyRuns >= config.maxVerifyRuns) {
       record(cat, items, { status: 'skipped', reason: `verification budget of ${config.maxVerifyRuns} runs exhausted` });
       return;
@@ -188,11 +205,14 @@ export async function runJanitor(options: RunOptions): Promise<RunReport> {
       failure = { command: '(apply)', exitCode: -1, timedOut: false, outputTail: err instanceof Error ? err.message : String(err) };
     }
 
+    if (failure && items.length === 1) applyFailures.set(cat.name, (applyFailures.get(cat.name) ?? 0) + 1);
     if (!failure) {
+      applyFailures.delete(cat.name);
       // Stage the step now, so that anything the verification suite writes
       // (coverage, build output, updated snapshots) can never end up in the commit.
       if (!(await git.stageAll())) {
         record(cat, items, { status: 'noop' });
+        log(`[${cat.name}] ${items.length} item(s) changed nothing; skipped`);
         return;
       }
       report.verifyRuns++;

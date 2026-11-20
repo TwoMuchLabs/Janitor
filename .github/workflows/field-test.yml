@@ -38,7 +38,7 @@ jobs:
             install: npm ci
           - name: express
             repo: expressjs/express
-            install: npm install --no-audit --no-fund && git checkout -- . && git clean -fdq -e node_modules
+            install: npm install --no-audit --no-fund
           - name: uuid
             repo: uuidjs/uuid
             install: npm ci
@@ -48,15 +48,15 @@ jobs:
           - name: axios
             repo: axios/axios
             install: npm ci && npx playwright install --with-deps chromium
+            # One fetch-adapter test fails on GitHub's runners on untouched code, so it is left out.
             verify: |
               npm run build
-              npx vitest run --project unit
-          - name: zod
-            repo: colinhacks/zod
-            install: pnpm install --frozen-lockfile
+              npx vitest run --project unit --exclude tests/unit/adapters/fetch.test.js
+          - name: fastify
+            repo: fastify/fastify
+            install: npm install --no-audit --no-fund
             verify: |
-              pnpm run build
-              pnpm run test
+              npm run test:ci
           - name: yup
             repo: jquense/yup
             install: yarn install --immutable
@@ -77,7 +77,7 @@ jobs:
               pnpm run test:unit
           - name: commerce
             repo: vercel/commerce
-            install: pnpm install --frozen-lockfile
+            install: pnpm install --frozen-lockfile --ignore-scripts
             verify: |
               pnpm exec tsc --noEmit
           - name: vue-pure-admin
@@ -116,6 +116,15 @@ jobs:
       - name: Install the project
         working-directory: target
         run: ${{ matrix.install }}
+
+      # Installing often rewrites a lockfile or leaves tool state behind. Janitor rightly
+      # refuses a dirty tree, so put tracked files back and ignore what is new.
+      - name: Set aside what the install left behind
+        working-directory: target
+        run: |
+          git status --porcelain
+          git checkout -- .
+          git ls-files --others --exclude-standard | sed 's|^|/|' >> .git/info/exclude
 
       - name: Run Janitor
         id: janitor
