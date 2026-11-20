@@ -29,6 +29,8 @@ Options
   --timeout-sec <n>        Timeout per verification command (default: 1200)
   --pr-body <file>         Where to write the PR description (default: <git-dir>/janitor/pr-body.md)
   --report-json <file>     Where to write the machine-readable report
+  --delete-files           Delete dead files instead of only proposing them (same as
+                           "deadFiles": "apply" in .janitor.json)
   --allow-unverified       Run even when no verification command exists (not recommended)
   -h, --help               Show this help
   -v, --version            Show the version
@@ -64,6 +66,7 @@ async function main(): Promise<void> {
       'pr-body': { type: 'string' },
       'report-json': { type: 'string' },
       'allow-unverified': { type: 'boolean' },
+      'delete-files': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },
@@ -80,6 +83,7 @@ async function main(): Promise<void> {
   const config = loadConfig(root);
   if (values.categories) config.categories = values.categories.split(',').map((s) => s.trim()).filter(Boolean);
   if (values['no-bisect']) config.bisect = false;
+  if (values['delete-files']) config.deadFiles = 'apply';
   for (const [flag, key] of [['max-verify-runs', 'maxVerifyRuns'], ['timeout-sec', 'verifyTimeoutSec']] as const) {
     const raw = values[flag];
     if (raw === undefined) continue;
@@ -98,6 +102,7 @@ async function main(): Promise<void> {
     date: values.date,
     dryRun: command === 'scan',
     allowUnverified: values['allow-unverified'],
+    proposeOnly: config.deadFiles === 'propose' ? ['dead-files'] : [],
     log: (m) => process.stderr.write(`${m}\n`),
   });
 
@@ -136,13 +141,18 @@ async function main(): Promise<void> {
         '',
         `Branch ${report.branch}: ${totals.commits} verified commit(s), ${totals.itemsKept} change(s) kept, ${totals.itemsReverted} reverted.`,
         `Dead code removed: ${formatBytes(totals.deadCodeBytes)}, ${totals.deadCodeLines} line(s).`,
+        ...(totals.itemsProposed ? [`${totals.itemsProposed} dead file(s) pass your checks when removed; proposed in the PR description, not deleted.`] : []),
         `PR description: ${prBodyFile}`,
         '',
       ].join('\n'),
     );
   } else {
     process.stdout.write(
-      `\nNothing to clean up${totals.itemsReverted ? ` (${totals.itemsReverted} candidate(s) reverted)` : ''}. No branch was left behind.\nReport: ${reportFile}\n`,
+      `\nNothing was changed${totals.itemsReverted ? ` (${totals.itemsReverted} candidate(s) reverted)` : ''}. No branch was left behind.\n` +
+        (totals.itemsProposed
+          ? `${totals.itemsProposed} dead file(s) pass your checks when removed and are proposed in ${prBodyFile}\n`
+          : '') +
+        `Report: ${reportFile}\n`,
     );
   }
 }

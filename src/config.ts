@@ -25,6 +25,13 @@ export interface JanitorConfig {
     /** Upper bound on dependency updates attempted per run. */
     max: number;
   };
+  /**
+   * What to do with dead files. `propose` (the default) checks that the
+   * project still passes without them and lists them in the PR, but deletes
+   * nothing: a wrongly deleted file is the costliest mistake this tool can
+   * make, and tests often cannot see it. `apply` deletes them.
+   */
+  deadFiles: 'propose' | 'apply';
   branchPrefix: string;
   /** When a category fails as a whole, split it to salvage the safe items. */
   bisect: boolean;
@@ -53,6 +60,7 @@ export const DEFAULT_CONFIG: JanitorConfig = {
   ignore: [],
   flags: { staleDays: 90 },
   deps: { exclude: [], max: 20 },
+  deadFiles: 'propose',
   branchPrefix: 'nightly-janitor',
   bisect: true,
   maxVerifyRuns: 25,
@@ -95,6 +103,12 @@ export function resolveConfig(raw: Record<string, unknown>): JanitorConfig {
     cfg.branchPrefix = raw.branchPrefix;
   }
   if (raw.bisect !== undefined) cfg.bisect = Boolean(raw.bisect);
+  if (raw.deadFiles !== undefined) {
+    if (raw.deadFiles !== 'propose' && raw.deadFiles !== 'apply') {
+      throw new ConfigError(`${CONFIG_FILE}: "deadFiles" must be "propose" or "apply"`);
+    }
+    cfg.deadFiles = raw.deadFiles;
+  }
   if (raw.maxVerifyRuns !== undefined) cfg.maxVerifyRuns = positive(raw.maxVerifyRuns, 'maxVerifyRuns');
   if (raw.verifyTimeoutSec !== undefined) cfg.verifyTimeoutSec = positive(raw.verifyTimeoutSec, 'verifyTimeoutSec');
 

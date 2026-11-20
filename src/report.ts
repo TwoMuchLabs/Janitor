@@ -6,6 +6,7 @@ interface CategoryTotals {
   kept: number;
   reverted: number;
   skipped: number;
+  proposed: number;
   /** Net bytes removed from the repository (negative if the category added bytes). */
   bytesRemoved: number;
   linesDeleted: number;
@@ -22,6 +23,7 @@ interface Totals {
   deadCodeBytes: number;
   itemsKept: number;
   itemsReverted: number;
+  itemsProposed: number;
   commits: number;
 }
 
@@ -34,6 +36,7 @@ export function computeTotals(report: RunReport): Totals {
     deadCodeBytes: 0,
     itemsKept: 0,
     itemsReverted: 0,
+    itemsProposed: 0,
     commits: 0,
   };
 
@@ -46,6 +49,7 @@ export function computeTotals(report: RunReport): Totals {
         kept: 0,
         reverted: 0,
         skipped: 0,
+        proposed: 0,
         bytesRemoved: 0,
         linesDeleted: 0,
         linesAdded: 0,
@@ -74,6 +78,9 @@ export function computeTotals(report: RunReport): Totals {
       totals.itemsReverted += step.items.length;
     } else if (step.status === 'skipped') {
       cat.skipped += step.items.length;
+    } else if (step.status === 'proposed') {
+      cat.proposed += step.items.length;
+      totals.itemsProposed += step.items.length;
     }
   }
   return totals;
@@ -114,13 +121,15 @@ export function renderPrBody(report: RunReport): string {
   const kept = report.steps.filter((s) => s.status === 'kept');
   const reverted = report.steps.filter((s) => s.status === 'reverted');
   const skipped = report.steps.filter((s) => s.status === 'skipped');
+  const proposed = report.steps.filter((s) => s.status === 'proposed');
   const out: string[] = [];
 
   out.push(`## Nightly janitor: ${report.date}`, '');
   out.push(
     `Removed **${formatBytes(totals.deadCodeBytes)}** and **${plural(totals.deadCodeLines, 'line')}** of dead code ` +
       `in ${plural(totals.commits, 'verified commit')}. ` +
-      `${plural(totals.itemsKept, 'change')} kept, ${totals.itemsReverted} reverted automatically.`,
+      `${plural(totals.itemsKept, 'change')} kept, ${totals.itemsReverted} reverted automatically` +
+      `${totals.itemsProposed ? `, ${totals.itemsProposed} proposed for you to decide` : ''}.`,
     '',
   );
   out.push(
@@ -159,6 +168,20 @@ export function renderPrBody(report: RunReport): string {
       out.push(...itemList(step));
       out.push('', `<details><summary>${summary}</summary>`, '', fence(f.outputTail || '(no output)'), '', '</details>', '');
     }
+  }
+
+  if (proposed.length) {
+    const paths = [...new Set(proposed.flatMap((s) => s.items.flatMap((i) => i.paths ?? [])))].sort();
+    out.push('### Proposed, not applied', '');
+    out.push(
+      'Nothing in the project reaches these files, and its checks still pass with them removed. They were **not** deleted: tests often cannot see a file that is loaded by convention, by a build script or by another system, so a person should confirm each one.',
+      '',
+    );
+    for (const step of proposed) out.push(...itemList(step, 40));
+    if (paths.length) {
+      out.push('', 'To remove them yourself:', '', fence(`git rm ${paths.map((p) => (/^[\w./@-]+$/.test(p) ? p : `'${p.replace(/'/g, `'\\''`)}'`)).join(' \\\n       ')}`, 'bash'));
+    }
+    out.push('', 'To let Janitor delete dead files itself, set `"deadFiles": "apply"` in `.janitor.json`.', '');
   }
 
   if (skipped.length) {
@@ -210,7 +233,7 @@ export function renderPlan(report: RunReport): string {
   const total = report.steps.reduce((n, s) => n + s.items.length, 0);
   out.push(`janitor plan (dry run): ${plural(total, 'candidate')}`, '');
   for (const step of report.steps) {
-    out.push(`${step.title} (${step.items.length})`);
+    out.push(`${step.title} (${step.items.length})${step.proposeOnly ? ' - checked and proposed only, nothing is deleted' : ''}`);
     for (const item of step.items) out.push(`  - ${item.description.replace(/`/g, '')}`);
     out.push('');
   }

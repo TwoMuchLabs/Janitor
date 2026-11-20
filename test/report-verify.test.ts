@@ -174,3 +174,37 @@ test('an edited line is not counted as a removed line of dead code', async () =>
   assert.equal(totals.deadCodeLines, 0);
   assert.match(renderPrBody(report), /Removed \*\*7 B\*\* and \*\*0 lines\*\* of dead code/);
 });
+
+test('proposed deletions get their own section with a ready-made command', async () => {
+  const root = makeRepo({ 'required.txt': 'x\n', 'src/old.ts': 'a\n', "src/it's odd.ts": 'b\n', 'keep.txt': 'k\n' });
+  const report = await runJanitor({
+    root,
+    date: '2026-11-20',
+    verify: ['test -f required.txt'],
+    proposeOnly: ['dead-files'],
+    categories: [
+      fakeCategory('dead-files', [
+        { ...deleteItem('src/old.ts'), paths: ['src/old.ts'] },
+        { ...deleteItem("src/it's odd.ts"), paths: ["src/it's odd.ts"] },
+      ]),
+      fakeCategory('other', [deleteItem('keep.txt')]),
+    ],
+  });
+  const totals = computeTotals(report);
+  assert.equal(totals.itemsProposed, 2);
+  assert.equal(totals.itemsKept, 1);
+  const body = renderPrBody(report);
+  assert.match(body, /1 change kept, 0 reverted automatically, 2 proposed for you to decide\./);
+  assert.match(body, /### Proposed, not applied[\s\S]*were \*\*not\*\* deleted/);
+  assert.ok(body.includes("git rm 'src/it'\\''s odd.ts' \\\n       src/old.ts"));
+  assert.match(body, /"deadFiles": "apply"/);
+
+  const plan = renderPlan(await runJanitor({ root, dryRun: true, verify: ['true'], proposeOnly: ['dead-files'], categories: [fakeCategory('dead-files', [deleteItem('src/old.ts')])] }));
+  assert.match(plan, /Fake dead-files \(1\) - checked and proposed only, nothing is deleted/);
+});
+
+test('deadFiles config accepts only propose or apply', () => {
+  assert.equal(resolveConfig({}).deadFiles, 'propose');
+  assert.equal(resolveConfig({ deadFiles: 'apply' }).deadFiles, 'apply');
+  assert.throws(() => resolveConfig({ deadFiles: 'yes' }), ConfigError);
+});

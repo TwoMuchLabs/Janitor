@@ -16,6 +16,8 @@ export interface JanitorContext {
 export interface CleanupItem {
   id: string;
   description: string;
+  /** Files this item deletes outright, for categories that only propose their changes. */
+  paths?: string[];
   /**
    * Mutate the working tree. Must re-read whatever it edits: by the time it
    * runs, earlier items may already have changed the same files.
@@ -42,7 +44,7 @@ export interface Category {
   afterRevert?(ctx: JanitorContext): Promise<void>;
 }
 
-type StepStatus = 'kept' | 'reverted' | 'noop' | 'skipped' | 'planned';
+type StepStatus = 'kept' | 'proposed' | 'reverted' | 'noop' | 'skipped' | 'planned';
 
 export interface StepFailure {
   command: string;
@@ -56,7 +58,9 @@ export interface StepRecord {
   title: string;
   countsAsDeadCode: boolean;
   status: StepStatus;
-  items: { id: string; description: string }[];
+  items: { id: string; description: string; paths?: string[] }[];
+  /** Set on planned steps of a category whose changes are proposed rather than applied. */
+  proposeOnly?: boolean;
   /** Commit sha, for kept steps. */
   sha?: string;
   stats?: DiffStats;

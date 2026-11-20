@@ -1,0 +1,154 @@
+# Runs Janitor against real open-source projects, using each project's own
+# complete checks (GitHub's runners have a browser and open network access,
+# which a sandbox does not).
+#
+# Nothing is pushed anywhere and no pull request is opened: each project is
+# cloned read-only into the runner, cleaned on a local branch, and thrown away.
+# Dead files are deleted here (--delete-files) even though that is off by
+# default, because this is exactly the behaviour that most needs testing.
+#
+# A project whose own baseline fails on the runner is reported as "refused",
+# not as a failure. Only a Janitor crash fails a job.
+name: Field test
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '11 3 * * 6' # Saturdays 03:11 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: field-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  project:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # verify: one command per line; empty means "whatever Janitor detects".
+          - name: commander.js
+            repo: tj/commander.js
+            install: npm ci
+          - name: express
+            repo: expressjs/express
+            install: npm install --no-audit --no-fund && git checkout -- . && git clean -fdq -e node_modules
+          - name: uuid
+            repo: uuidjs/uuid
+            install: npm ci
+          - name: ky
+            repo: sindresorhus/ky
+            install: npm install --no-audit --no-fund --no-package-lock && npx playwright install --with-deps chromium firefox webkit
+          - name: axios
+            repo: axios/axios
+            install: npm ci && npx playwright install --with-deps chromium
+            verify: |
+              npm run build
+              npx vitest run --project unit
+          - name: zod
+            repo: colinhacks/zod
+            install: pnpm install --frozen-lockfile
+            verify: |
+              pnpm run build
+              pnpm run test
+          - name: yup
+            repo: jquense/yup
+            install: yarn install --immutable
+          - name: excalidraw
+            repo: excalidraw/excalidraw
+            install: yarn install --frozen-lockfile
+            verify: |
+              yarn test:typecheck
+              yarn test:other
+              yarn test:code
+              yarn test:app --run
+          - name: vitesse
+            repo: antfu-collective/vitesse
+            install: pnpm install --frozen-lockfile
+            verify: |
+              pnpm run typecheck
+              pnpm run build
+              pnpm run test:unit
+          - name: commerce
+            repo: vercel/commerce
+            install: pnpm install --frozen-lockfile
+            verify: |
+              pnpm exec tsc --noEmit
+          - name: vue-pure-admin
+            repo: pure-admin/vue-pure-admin
+            install: pnpm install --frozen-lockfile
+            verify: |
+              pnpm run typecheck
+              pnpm run build
+          - name: elk
+            repo: elk-zone/elk
+            install: pnpm install --frozen-lockfile
+            verify: |
+              pnpm run typecheck
+              pnpm run test:ci
+    steps:
+      - name: Check out Janitor
+        uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Build Janitor
+        run: npm ci --no-audit --no-fund && npm run build
+
+      - name: Check out ${{ matrix.repo }}
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ matrix.repo }}
+          path: target
+          persist-credentials: false
+
+      - name: Enable pnpm and yarn
+        run: corepack enable
+
+      - name: Install the project
+        working-directory: target
+        run: ${{ matrix.install }}
+
+      - name: Run Janitor
+        id: janitor
+        working-directory: target
+        env:
+          VERIFY: ${{ matrix.verify }}
+        run: |
+          git config user.name "janitor field test"
+          git config user.email "janitor@users.noreply.github.com"
+          args=(run --delete-files --max-verify-runs 14 --timeout-sec 1200
+                --pr-body "$RUNNER_TEMP/pr-body.md" --report-json "$RUNNER_TEMP/report.json")
+          while IFS= read -r line; do
+            if [ -n "${line// /}" ]; then args+=(--verify "$line"); fi
+          done <<< "$VERIFY"
+          set +e
+          node "$GITHUB_WORKSPACE/dist/cli.js" "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/janitor.log"
+          echo "code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Summarise
+        if: always() && steps.janitor.outputs.code != ''
+        run: |
+          node scripts/field-summary.mjs "${{ matrix.repo }}" "${{ steps.janitor.outputs.code }}" \
+            "$RUNNER_TEMP/report.json" "$RUNNER_TEMP/pr-body.md" "$RUNNER_TEMP/janitor.log" \
+            "$RUNNER_TEMP/result-${{ matrix.name }}.json" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: field-${{ matrix.name }}
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/result-${{ matrix.name }}.json
+            ${{ runner.temp }}/report.json
+            ${{ runner.temp }}/pr-body.md
+            ${{ runner.temp }}/janitor.log

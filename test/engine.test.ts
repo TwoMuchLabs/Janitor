@@ -261,3 +261,39 @@ test('a timed-out verification command counts as a failure', async () => {
   assert.equal(report.steps[0]!.failure!.timedOut, true);
   assert.ok(!exists(root, 'hang.flag'));
 });
+
+test('a propose-only category is verified, reported and put back, never committed', async () => {
+  const root = makeRepo(baseFiles);
+  const base = git(root, 'rev-parse', 'HEAD');
+  const report = await run(
+    root,
+    [
+      fakeCategory('dead-files', [{ ...deleteItem('junk-a.txt'), paths: ['junk-a.txt'] }, breaking]),
+      fakeCategory('other', [deleteItem('junk-b.txt')]),
+    ],
+    { proposeOnly: ['dead-files'] },
+  );
+  assert.deepEqual(
+    report.steps.map((s) => [s.category, s.status, s.items.map((i) => i.id).join()]),
+    [
+      ['dead-files', 'proposed', 'delete:junk-a.txt'],
+      ['dead-files', 'reverted', 'breaking'],
+      ['other', 'kept', 'delete:junk-b.txt'],
+    ],
+  );
+  // The proposed file is still there; only the other category's change was committed.
+  assert.ok(exists(root, 'junk-a.txt'));
+  assert.ok(!exists(root, 'junk-b.txt'));
+  assert.equal(git(root, 'rev-list', '--count', `${base}..HEAD`), '1');
+  assert.equal(git(root, 'status', '--porcelain'), '');
+});
+
+test('when everything is only proposed, no branch is left behind', async () => {
+  const root = makeRepo(baseFiles);
+  const report = await run(root, [fakeCategory('dead-files', [deleteItem('junk-a.txt')])], { proposeOnly: ['dead-files'] });
+  assert.equal(report.steps[0]!.status, 'proposed');
+  assert.equal(report.changed, false);
+  assert.ok(exists(root, 'junk-a.txt'));
+  assert.equal(git(root, 'rev-parse', '--abbrev-ref', 'HEAD'), 'main');
+  assert.equal(git(root, 'branch', '--list', 'nightly-janitor/*'), '');
+});

@@ -38,6 +38,11 @@ export interface RunOptions {
   dryRun?: boolean;
   /** Permit running with no verification commands. Off by default: without tests, nothing is "safe". */
   allowUnverified?: boolean;
+  /**
+   * Categories (by name) whose changes are verified and reported but never
+   * committed: the tree is put back after the checks pass.
+   */
+  proposeOnly?: string[];
   log?: Logger;
 }
 
@@ -82,6 +87,7 @@ export async function runJanitor(options: RunOptions): Promise<RunReport> {
   const git = new Git(root);
   const ctx: JanitorContext = { root, git, config, log };
   const verify = options.verify;
+  const proposeOnly = new Set(options.proposeOnly ?? []);
   const timeoutMs = config.verifyTimeoutSec * 1000;
 
   if (!(await git.isRepo())) throw new JanitorError('not-a-repo', `${root} is not a git repository`);
@@ -117,7 +123,7 @@ export async function runJanitor(options: RunOptions): Promise<RunReport> {
       category: cat.name,
       title: cat.title,
       countsAsDeadCode: cat.countsAsDeadCode,
-      items: items.map((i) => ({ id: i.id, description: i.description })),
+      items: items.map((i) => ({ id: i.id, description: i.description, ...(i.paths ? { paths: i.paths } : {}) })),
       ...rest,
     });
   };
@@ -138,7 +144,7 @@ export async function runJanitor(options: RunOptions): Promise<RunReport> {
   if (options.dryRun) {
     for (const cat of options.categories) {
       const items = await scan(cat);
-      if (items.length) record(cat, items, { status: 'planned' });
+      if (items.length) record(cat, items, { status: 'planned', proposeOnly: proposeOnly.has(cat.name) });
     }
     return report;
   }
@@ -192,6 +198,13 @@ export async function runJanitor(options: RunOptions): Promise<RunReport> {
       report.verifyRuns++;
       log(`[${cat.name}] verifying ${items.length} item(s)`);
       const result = await runVerify(verify, root, timeoutMs);
+      if (result.ok && proposeOnly.has(cat.name)) {
+        // The project passes without these, which is worth telling a reviewer; acting on it is their call.
+        await revert(cat);
+        record(cat, items, { status: 'proposed' });
+        log(`[${cat.name}] ${items.length} item(s) pass the checks when removed; proposed, not applied`);
+        return;
+      }
       if (result.ok) {
         const sha = await git.commitStaged(commitMessage(cat, items, verify));
         if (await git.hasChanges()) await git.restore(sha);

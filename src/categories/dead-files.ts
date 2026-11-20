@@ -100,6 +100,7 @@ export const deadFiles: Category = {
           : '';
         return {
           id: `dead-file:${file}`,
+          paths: files,
           description: `delete \`${file}\` (unreachable from any entry point${withImporters})`,
           async apply(c) {
             for (const f of files) await fs.rm(path.join(c.root, f), { force: true });

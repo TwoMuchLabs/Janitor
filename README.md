@@ -3,22 +3,23 @@
 **A nightly cleanup crew for your repository that never leaves it broken.**
 
 Janitor finds dead files, unused exports, stale feature flags and outdated
-minor/patch dependencies, then removes them **one verified step at a time**. After
-every step it runs *your* typecheck, build and tests. Anything that breaks is rolled
-back on the spot. You wake up to a pull request that lists exactly what was removed,
-what was tried and reverted, and the commands to undo any of it.
+minor/patch dependencies. It removes unused exports and flags and applies the updates
+**one verified step at a time**: after every step it runs *your* typecheck, build and
+tests, and anything that breaks is rolled back on the spot. Dead files it checks the
+same way but only proposes, leaving the deletion to you. You wake up to a pull request
+that lists what was removed, what was tried and reverted, what it suggests deleting,
+and the commands to undo any of it.
 
 ```
 [dead-files] 3 candidate(s)
 [dead-files] reverted 3 item(s): npm test failed          <- one of them was load-bearing
-[dead-files] kept 1 item(s) as 3c7de0479                  <- bisected: the safe ones survive
-[dead-files] kept 1 item(s) as 1048a3a98
+[dead-files] 2 item(s) pass the checks when removed; proposed, not applied
 [unused-exports] kept 2 item(s) as 7df8529c3
 [stale-flags] kept 1 item(s) as 29f8748a8
 [outdated-deps] kept 1 item(s) as bd73a0ec0
 
-Branch nightly-janitor/2026-11-20: 5 verified commit(s), 6 change(s) kept, 2 reverted.
-Dead code removed: 403 B, 18 line(s).
+Branch nightly-janitor/2026-11-20: 3 verified commit(s), 4 change(s) kept, 2 reverted.
+2 dead file(s) pass your checks when removed; proposed in the PR description, not deleted.
 ```
 
 ## Quickstart
@@ -113,7 +114,7 @@ and you are returned to where you started.
 
 | Category | Finds | Action |
 | --- | --- | --- |
-| `dead-files` | JS/TS files unreachable from every entry point | Deletes the file (with any dead files that import it) |
+| `dead-files` | JS/TS files unreachable from every entry point | **Proposes** the deletion: checks that the project still passes without the file and lists it in the PR with a ready `git rm` command. Deletes it only if you set `"deadFiles": "apply"` |
 | `unused-exports` | Named exports no other module imports | Deletes the declaration (and imports only it used) if nothing else uses it and it has no side effects; otherwise just drops `export`. Files that satisfied prettier or biome are re-formatted |
 | `stale-flags` | Flags in a JSON registry that nothing references | Removes the registry entry. Flags fully on for 90+ days are **reported**, not inlined |
 | `outdated-deps` | npm, pnpm or Yarn 1 packages behind within their declared range | `npm update` / `pnpm update` / `yarn upgrade`, one package per step, lockfile only |
@@ -166,6 +167,7 @@ The generated description ([`src/report.ts`](src/report.ts)) contains:
 - **Summary table** per category: items kept and reverted, bytes removed, lines deleted, commits.
 - **Headline totals**: bytes and lines of dead code removed (lockfile churn is reported but not counted as dead code).
 - **What changed**: every kept item, grouped by commit.
+- **Proposed, not applied**: dead files the project passes without, and the command to remove them.
 - **Reverted automatically**: every item that broke verification, with the failing command and its output.
 - **Needs a human**: stale flags to inline, major updates, files held back.
 - **Rollback**: exact commands with real shas.
@@ -195,6 +197,7 @@ Everything is optional. Put a `.janitor.json` in the repository root:
   "ignore": ["src/legacy/**"],
   "flags": { "registry": "config/flags.json", "staleDays": 90 },
   "deps": { "exclude": ["react"], "max": 20 },
+  "deadFiles": "propose",
   "bisect": true,
   "maxVerifyRuns": 25,
   "verifyTimeoutSec": 1200
@@ -210,6 +213,7 @@ Everything is optional. Put a `.janitor.json` in the repository root:
 | `flags.registry` | detected | JSON object of flags (`flags.json`, `config/flags.json`, ...), optionally under a `flags` key |
 | `flags.staleDays` | `90` | Age at which a fully-on flag is reported |
 | `deps.exclude` / `deps.max` | `[]` / `20` | Packages to leave alone; updates attempted per night |
+| `deadFiles` | `propose` | `propose` verifies and lists dead files without deleting them; `apply` deletes them |
 | `bisect` | `true` | Salvage safe items when a category fails |
 | `maxVerifyRuns` | `25` | Cap on verification runs per night |
 | `verifyTimeoutSec` | `1200` | Timeout per verification command |
@@ -229,6 +233,7 @@ janitor scan [options]   Dry run: list what would be attempted, change nothing
   --timeout-sec <n>        Timeout per verification command
   --pr-body <file>         Where to write the PR description
   --report-json <file>     Where to write the JSON report
+  --delete-files           Delete dead files instead of only proposing them
   --allow-unverified       Run with no verification command (not recommended)
 ```
 
@@ -305,6 +310,22 @@ export const removeTodoFiles: Category = {
   },
 };
 ```
+
+## Why dead files are only proposed
+
+Janitor changes code in two tiers.
+
+- **Applied:** dropping an unused `export`, removing a flag nothing references, and small
+  dependency updates. If one of these is wrong, your typecheck, build or tests fail and the
+  step is reverted.
+- **Proposed:** deleting a file. Janitor still runs your checks with the file removed, and
+  tells you they pass, but leaves the file in place.
+
+The reason is the test record below. Every serious mistake Janitor made on other people's
+code was a file deletion that the project's own tests could not see: a file loaded by
+listing a directory, swapped in by a build script, or picked up by a tool's convention.
+The rules that came out of those runs catch the cases found so far. They cannot catch a
+convention nobody has shown it yet, so the default keeps a person in that decision.
 
 ## How it has been tested
 
@@ -389,7 +410,7 @@ to merge unread.
 ```bash
 npm ci
 npm run typecheck
-npm test          # 61 tests; the engine suite drives real temporary git repositories
+npm test          # 65 tests; the engine suite drives real temporary git repositories
 npm run build
 ```
 
