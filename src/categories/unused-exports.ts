@@ -1,9 +1,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import ts from 'typescript';
+import { collectIdentifiers, tidyImports } from '../analysis/imports.js';
 import { ALL, declaredExports } from '../analysis/module-graph.js';
 import { analyzeProject } from '../analysis/project.js';
 import type { Category, CleanupItem } from '../types.js';
+import { editKeepingFormat } from '../util/format.js';
 
 function isPure(expr: ts.Expression): boolean {
   if (ts.isArrowFunction(expr) || ts.isFunctionExpression(expr)) return true;
@@ -101,6 +103,8 @@ export function removeExport(text: string, fileName: string, name: string): { te
       if (start > 0 && text[start - 1] === '\n' && (start < 2 || text[start - 2] === '\n') && text[end] === '\n') end++;
       // ...or a trailing blank line when it was the last thing in the file.
       if (end === text.length) while (start > 1 && text[start - 1] === '\n' && text[start - 2] === '\n') start--;
+      // ...or a leading one when it was the first.
+      if (start === 0) while (text[end] === '\n' || text[end] === '\r') end++;
       edits.push({ start, end });
     } else {
       const mod = ts.getModifiers(stmt as ts.HasModifiers)!.find((m) => m.kind === ts.SyntaxKind.ExportKeyword)!;
@@ -112,6 +116,12 @@ export function removeExport(text: string, fileName: string, name: string): { te
 
   let out = text;
   for (const e of edits.sort((a, b) => b.start - a.start)) out = out.slice(0, e.start) + out.slice(e.end);
+  if (deletable) {
+    // Whatever the deleted code was the last user of should not be left imported.
+    const mentioned = new Set<string>();
+    for (const stmt of matches) collectIdentifiers(stmt, mentioned);
+    out = tidyImports(out, fileName, mentioned);
+  }
   return { text: out, kind: deletable ? 'deleted' : 'unexported' };
 }
 
@@ -163,7 +173,7 @@ export const unusedExports: Category = {
           async apply(c) {
             const abs = path.join(c.root, file);
             const result = removeExport(await fs.readFile(abs, 'utf8'), abs, exp.name);
-            if (result) await fs.writeFile(abs, result.text);
+            if (result) await editKeepingFormat(c.root, file, () => fs.writeFile(abs, result.text));
           },
         });
       }

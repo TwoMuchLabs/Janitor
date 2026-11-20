@@ -114,7 +114,7 @@ and you are returned to where you started.
 | Category | Finds | Action |
 | --- | --- | --- |
 | `dead-files` | JS/TS files unreachable from every entry point | Deletes the file (with any dead files that import it) |
-| `unused-exports` | Named exports no other module imports | Deletes the declaration if nothing else uses it and it has no side effects; otherwise just drops `export` |
+| `unused-exports` | Named exports no other module imports | Deletes the declaration (and imports only it used) if nothing else uses it and it has no side effects; otherwise just drops `export`. Files that satisfied prettier or biome are re-formatted |
 | `stale-flags` | Flags in a JSON registry that nothing references | Removes the registry entry. Flags fully on for 90+ days are **reported**, not inlined |
 | `outdated-deps` | npm, pnpm or Yarn 1 packages behind within their declared range | `npm update` / `pnpm update` / `yarn upgrade`, one package per step, lockfile only |
 
@@ -263,7 +263,8 @@ Janitor/
 │   ├── analysis/
 │   │   ├── module-graph.ts       import/export graph via the TypeScript compiler API
 │   │   ├── entries.ts            entry-point discovery
-│   │   └── project.ts            reachability + out-of-graph "mentions"
+│   │   ├── project.ts            reachability + out-of-graph "mentions"
+│   │   └── imports.ts            removes imports left unused by a deletion
 │   └── categories/
 │       ├── dead-files.ts
 │       ├── unused-exports.ts
@@ -333,10 +334,24 @@ Each is now a rule with a regression test. Where its remaining findings were che
 by hand (ky, vercel/commerce, the React Native template, Sarvavox, and samples from
 outline, excalidraw and yup) they were correct.
 
-Most of this was dry runs checked by hand. Its changes have been verified by a
-project's own checks on Sarvavox, ky and axios only. Nineteen codebases is still a
-small sample: treat its pull requests as proposals to review, not as changes to merge
-unread.
+Most of this was dry runs checked by hand. Its changes have also been run through a
+project's own checks on six codebases:
+
+| Project | Changes kept | Checked with |
+|---|---|---|
+| Sarvavox (lab, on GitHub) | 2 unused exports | its build and check scripts; merged |
+| ky | 11 unused exports | lint, build, typecheck |
+| axios | dependency updates | build and unit tests |
+| vercel/commerce | 10 unused exports | typecheck; changed files pass its formatter |
+| excalidraw | 5 unused exports | typecheck, formatter, and its linter on the changed files |
+| vitesse | 19 pnpm dependency updates | typecheck; one update that failed to install was isolated and reverted |
+
+These were run in a sandbox without a browser or open network access, so browser
+tests, and test files or builds that fetch from the network, were left out. None of
+the six is a full run of a project's complete suite except Sarvavox.
+
+Nineteen codebases is still a small sample: treat its pull requests as proposals to
+review, not as changes to merge unread.
 
 ## Limitations (v0.1)
 
@@ -346,8 +361,10 @@ unread.
   import each other through workspace links; per-package `paths` are not read yet.
   Nested packages that are not workspaces are skipped; run janitor in each with `working-directory`.
 - `export { a, b }` lists, `export default` and CommonJS `module.exports` are not pruned.
-- Removing an export can leave an import that only it used. With `noUnusedLocals`
-  or a lint step in `verify`, that step is reverted rather than fixed up.
+- When a declaration is deleted, imports that only it used are removed too. A value import
+  that loses every name is reduced to `import 'module'` rather than deleted, so the module
+  is still loaded; you may want to delete that line by hand.
+- Only prettier and biome are recognised for re-formatting edited files.
 - Dependency updates support npm (`package-lock.json`), pnpm (`pnpm-lock.yaml`) and Yarn 1
   (`yarn.lock`), at the repository root only. Yarn 2 and later, and Bun, are skipped. With pnpm the PR states the newest
   version available; the update stops wherever the declared range ends.
@@ -360,7 +377,7 @@ unread.
 ```bash
 npm ci
 npm run typecheck
-npm test          # 56 tests; the engine suite drives real temporary git repositories
+npm test          # 59 tests; the engine suite drives real temporary git repositories
 npm run build
 ```
 

@@ -150,12 +150,14 @@ export function renderPrBody(report: RunReport): string {
 
   if (reverted.length) {
     out.push('### Reverted automatically', '');
-    out.push('These changes broke verification, were rolled back, and are **not** in this PR.', '');
+    out.push('These changes failed, were rolled back, and are **not** in this PR.', '');
     for (const step of reverted) {
       const f = step.failure!;
       const why = f.timedOut ? 'timed out' : `exited ${f.exitCode}`;
+      // A step that could not even be applied never reached the project's checks.
+      const summary = f.command === '(apply)' ? 'Could not be applied' : `<code>${f.command}</code> ${why}`;
       out.push(...itemList(step));
-      out.push('', `<details><summary><code>${f.command}</code> ${why}</summary>`, '', fence(f.outputTail || '(no output)'), '', '</details>', '');
+      out.push('', `<details><summary>${summary}</summary>`, '', fence(f.outputTail || '(no output)'), '', '</details>', '');
     }
   }
 

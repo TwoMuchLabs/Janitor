@@ -179,7 +179,7 @@ export async function runJanitor(options: RunOptions): Promise<RunReport> {
     try {
       for (const item of items) await item.apply(ctx);
     } catch (err) {
-      failure = { command: '(apply)', exitCode: -1, timedOut: false, outputTail: String((err as Error).stack ?? err) };
+      failure = { command: '(apply)', exitCode: -1, timedOut: false, outputTail: err instanceof Error ? err.message : String(err) };
     }
 
     if (!failure) {

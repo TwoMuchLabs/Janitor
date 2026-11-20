@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mapToSources } from '../src/analysis/entries.js';
@@ -369,4 +371,78 @@ test('Docusaurus theme overrides are entry points', async () => {
     'src/components/Unused.js': `export default function Unused() {}\n`,
   });
   assert.deepEqual(ids((await deadFiles.scan(context(root))).items), ['dead-file:src/components/Unused.js']);
+});
+
+test('deleting a declaration also removes the imports only it used', () => {
+  const src = [
+    `import fs from 'node:fs';`,
+    `import path, { join, resolve } from 'node:path';`,
+    `import type { Stats } from 'node:fs';`,
+    `import { z } from 'zod';`,
+    `import * as os from 'node:os';`,
+    `import { alreadyUnused } from './other';`,
+    ``,
+    `export function dead(p: string): Stats {`,
+    `  return fs.statSync(join(p, z.string().parse(os.tmpdir())));`,
+    `}`,
+    ``,
+    `export const live = () => resolve(path.sep);`,
+    ``,
+  ].join('\n');
+  const out = removeExport(src, 'f.ts', 'dead')!;
+  assert.equal(out.kind, 'deleted');
+  assert.equal(
+    out.text,
+    [
+      `import 'node:fs';`,
+      `import path, { resolve } from 'node:path';`,
+      `import 'zod';`,
+      `import 'node:os';`,
+      `import { alreadyUnused } from './other';`,
+      ``,
+      `export const live = () => resolve(path.sep);`,
+      ``,
+    ].join('\n'),
+  );
+});
+
+test('import tidying keeps multi-line layout and leaves un-exported code alone', () => {
+  const multi = `import {\n  a,\n  b,\n  c,\n} from './m';\n\nexport function dead() {\n  return b;\n}\n\nexport const live = [a, c];\n`;
+  assert.equal(removeExport(multi, 'f.ts', 'dead')!.text, `import {\n  a,\n  c,\n} from './m';\n\nexport const live = [a, c];\n`);
+
+  // Only the keyword is dropped here, so nothing became unused.
+  const kept = `import { a } from './m';\nexport function helper() { return a; }\nexport const live = helper();\n`;
+  assert.equal(removeExport(kept, 'f.ts', 'helper')!.text, `import { a } from './m';\nfunction helper() { return a; }\nexport const live = helper();\n`);
+
+  // First statement in the file: no blank line is left at the top.
+  assert.equal(removeExport(`export type Maybe<T> = T | null;\n\nexport type Keep = string;\n`, 'f.ts', 'Maybe')!.text, `export type Keep = string;\n`);
+});
+
+test('a file that satisfied the formatter is re-formatted after an edit; others are left as edited', async () => {
+  // A stand-in for prettier: "clean" means the file has no line starting with a space;
+  // --write strips leading spaces. Enough to observe when Janitor calls it.
+  const stub = [
+    `#!/usr/bin/env node`,
+    `const fs = require('fs');`,
+    `const args = process.argv.slice(2);`,
+    `const file = args[args.length - 1];`,
+    `const text = fs.readFileSync(file, 'utf8');`,
+    `if (args[0] === '--check') process.exit(/^ /m.test(text) ? 1 : 0);`,
+    `fs.writeFileSync(file, text.replace(/^ +/gm, '') + '// formatted\\n');`,
+    '',
+  ].join('\n');
+  const root = makeRepo({
+    'package.json': pkg({ prettier: {} }),
+    'src/index.ts': `import { a } from './tidy';\nimport { b } from './messy';\nconsole.log(a, b);\n`,
+    'src/tidy.ts': `export const a = 1;\nexport const unusedTidy = 2;\n`,
+    'src/messy.ts': `export const b = 1;\n  export const unusedMessy = 2;\n`,
+  });
+  const bin = path.join(root, 'node_modules', '.bin');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, 'prettier'), stub, { mode: 0o755 });
+
+  const ctx = context(root);
+  for (const item of (await unusedExports.scan(ctx)).items) await item.apply(ctx);
+  assert.equal(read(root, 'src/tidy.ts'), `export const a = 1;\n// formatted\n`);
+  assert.equal(read(root, 'src/messy.ts'), `export const b = 1;\n`);
 });
