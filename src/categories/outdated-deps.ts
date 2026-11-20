@@ -95,8 +95,70 @@ export function planUpdates(
   return { updates: updates.slice(0, max), notes };
 }
 
-const NPM_FLAGS = ['--no-audit', '--no-fund', '--loglevel=error'];
-const NPM_TIMEOUT_MS = 10 * 60 * 1000;
+/**
+ * Parse `pnpm outdated --format json`. pnpm reports the locked version as
+ * `wanted` (and `current` only when installed) plus `latest`; it does not say
+ * how far the declared range reaches. So the target is "latest, if that is a
+ * minor or patch step", and `pnpm update` then goes as far as the range allows.
+ */
+export function parsePnpmOutdated(stdout: string): OutdatedEntry[] {
+  let json: unknown;
+  try {
+    json = JSON.parse(stdout || '{}');
+  } catch {
+    return [];
+  }
+  if (typeof json !== 'object' || json === null) return [];
+  const entries: OutdatedEntry[] = [];
+  for (const [name, value] of Object.entries(json)) {
+    const info = value as Record<string, unknown>;
+    const locked = typeof info.current === 'string' ? info.current : info.wanted;
+    if (typeof locked !== 'string' || typeof info.latest !== 'string') continue;
+    const step = classifyUpdate(locked, info.latest);
+    entries.push({ name, current: locked, wanted: step === 'patch' || step === 'minor' ? info.latest : locked, latest: info.latest });
+  }
+  return entries;
+}
+
+type Manager = 'npm' | 'pnpm';
+
+const QUIET = ['--loglevel=error'];
+const NPM_FLAGS = ['--no-audit', '--no-fund', ...QUIET];
+const TIMEOUT_MS = 10 * 60 * 1000;
+
+const MANAGERS: Record<Manager, {
+  lockfile: string;
+  outdated: string[];
+  parse: (stdout: string) => OutdatedEntry[];
+  update: (name: string) => string[];
+  reinstall: string[];
+  /** pnpm cannot say where the declared range ends, so the target is an upper bound. */
+  upperBound: boolean;
+}> = {
+  npm: {
+    lockfile: 'package-lock.json',
+    outdated: ['outdated', '--json', ...NPM_FLAGS],
+    parse: parseNpmOutdated,
+    update: (name) => ['update', name, ...NPM_FLAGS],
+    reinstall: ['install', '--prefer-offline', ...NPM_FLAGS],
+    upperBound: false,
+  },
+  pnpm: {
+    lockfile: 'pnpm-lock.yaml',
+    outdated: ['outdated', '--format', 'json'],
+    parse: parsePnpmOutdated,
+    update: (name) => ['update', name, ...QUIET],
+    reinstall: ['install', '--frozen-lockfile', '--prefer-offline', ...QUIET],
+    upperBound: true,
+  },
+};
+
+function detectManager(root: string): Manager | null {
+  for (const manager of ['npm', 'pnpm'] as const) {
+    if (fs.existsSync(path.join(root, MANAGERS[manager].lockfile))) return manager;
+  }
+  return null;
+}
 
 /**
  * Minor and patch dependency updates, one package per item so a single bad
@@ -110,7 +172,8 @@ export const outdatedDeps: Category = {
 
   async scan(ctx) {
     if (!fs.existsSync(path.join(ctx.root, 'package.json'))) return { items: [], notes: [] };
-    if (!fs.existsSync(path.join(ctx.root, 'package-lock.json'))) {
+    const manager = detectManager(ctx.root);
+    if (!manager) {
       let hasDeps = false;
       try {
         const pkg = JSON.parse(fs.readFileSync(path.join(ctx.root, 'package.json'), 'utf8')) as Record<string, object>;
@@ -121,27 +184,31 @@ export const outdatedDeps: Category = {
       if (!hasDeps) return { items: [], notes: [] };
       return {
         items: [],
-        notes: ['Dependency updates currently support npm with a committed `package-lock.json`; skipped.'],
+        notes: ['Dependency updates need a committed `package-lock.json` (npm) or `pnpm-lock.yaml` (pnpm); skipped.'],
       };
     }
-    // `npm outdated` exits 1 when anything is outdated; only the JSON matters.
-    const res = await exec('npm', ['outdated', '--json', ...NPM_FLAGS], { cwd: ctx.root, timeoutMs: NPM_TIMEOUT_MS });
-    const { updates, notes } = planUpdates(parseNpmOutdated(res.stdout), ctx.config.deps.exclude, ctx.config.deps.max);
+    const m = MANAGERS[manager];
+    // `outdated` exits 1 when anything is outdated; only the JSON matters.
+    const res = await exec(manager, m.outdated, { cwd: ctx.root, timeoutMs: TIMEOUT_MS });
+    const { updates, notes } = planUpdates(m.parse(res.stdout), ctx.config.deps.exclude, ctx.config.deps.max);
 
     const items: CleanupItem[] = updates.map((u) => ({
       id: `dep:${u.name}@${u.to}`,
-      description: `update \`${u.name}\` ${u.from} -> ${u.to} (${u.kind})`,
+      description: m.upperBound
+        ? `update \`${u.name}\` from ${u.from}, up to ${u.to} as far as its declared range allows (${u.kind})`
+        : `update \`${u.name}\` ${u.from} -> ${u.to} (${u.kind})`,
       async apply(c) {
-        const r = await exec('npm', ['update', u.name, ...NPM_FLAGS], { cwd: c.root, timeoutMs: NPM_TIMEOUT_MS });
-        if (r.code !== 0) throw new Error(`npm update ${u.name} failed: ${r.stderr.trim() || r.stdout.trim()}`);
+        const r = await exec(manager, m.update(u.name), { cwd: c.root, timeoutMs: TIMEOUT_MS });
+        if (r.code !== 0) throw new Error(`${manager} update ${u.name} failed: ${r.stderr.trim() || r.stdout.trim()}`);
       },
     }));
     return { items, notes };
   },
 
-  /** git restored package-lock.json; bring node_modules back in line with it. */
+  /** git restored the lockfile; bring node_modules back in line with it. */
   async afterRevert(ctx) {
-    if (!fs.existsSync(path.join(ctx.root, 'node_modules'))) return;
-    await exec('npm', ['install', '--prefer-offline', ...NPM_FLAGS], { cwd: ctx.root, timeoutMs: NPM_TIMEOUT_MS });
+    const manager = detectManager(ctx.root);
+    if (!manager || !fs.existsSync(path.join(ctx.root, 'node_modules'))) return;
+    await exec(manager, MANAGERS[manager].reinstall, { cwd: ctx.root, timeoutMs: TIMEOUT_MS });
   },
 };

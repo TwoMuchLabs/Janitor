@@ -19,6 +19,11 @@ const CONVENTION_ENTRY_GLOBS = [
   '**/cypress/**',
   '**/playwright/**',
   '**/*.stories.*',
+  '**/*.test-d.*',
+  '**/test-d/**',
+  // sample inputs that test runners and compilers read from disk rather than import
+  '**/{fixtures,fixture,__fixtures__,testdata,test-data,stubs,mocks,snapshots,__snapshots__}/**',
+  '**/{samples,templates,template,playground,sandbox,demo,demos}/**',
   // tooling and configuration
   '**/*.config.*',
   '**/*.conf.*',
@@ -52,6 +57,31 @@ const CONVENTION_ENTRY_GLOBS = [
   '**/middleware.*',
   '**/instrumentation.*',
 ];
+
+/**
+ * Frameworks that find their entry points on disk instead of through
+ * package.json. When one is a dependency, these paths (relative to that
+ * package) are genuine program roots.
+ */
+const FRAMEWORK_ROOTS: { deps: string[]; globs: string[] }[] = [
+  {
+    deps: ['next'],
+    globs: ['{app,pages}/**', 'src/{app,pages}/**', '{middleware,proxy,instrumentation}*.*', 'src/{middleware,proxy,instrumentation}*.*', 'next.config.*'],
+  },
+  { deps: ['@sveltejs/kit'], globs: ['src/routes/**', 'src/hooks*.*', 'src/params/**', 'src/service-worker.*', 'svelte.config.*'] },
+  { deps: ['@remix-run/react', '@remix-run/node', '@react-router/dev'], globs: ['app/routes/**', 'app/{root,entry,routes}*.*'] },
+  {
+    deps: ['nuxt'],
+    globs: ['{pages,app,server,plugins,middleware,layouts,composables,components,utils}/**', 'app.*', 'nuxt.config.*'],
+  },
+  { deps: ['astro'], globs: ['src/pages/**', 'src/middleware.*', 'src/content/config.*', 'src/content.config.*', 'astro.config.*'] },
+  { deps: ['expo-router'], globs: ['app/**', 'src/app/**'] },
+  { deps: ['expo', 'react-native'], globs: ['{App,index}.*', 'app.config.*'] },
+  { deps: ['gatsby'], globs: ['src/pages/**', 'src/templates/**', 'gatsby-*.*'] },
+  { deps: ['@nestjs/core', '@angular/core'], globs: ['src/main*.*'] },
+];
+
+const HTML_SCRIPT = /<script\b[^>]*\bsrc\s*=\s*["']([^"'?#]+)/gi;
 
 /** Conventional program roots, used when package.json declares none. */
 const ROOT_CONVENTION_GLOBS = ['{index,main}.*', '**/src/{index,main,cli,server,app}.*'];
@@ -155,6 +185,34 @@ export function findEntryPoints(root: string, tracked: string[], sources: string
 
     const pkgDir = path.posix.dirname(pkgFile);
     for (const d of declared) for (const f of mapToSources(d, pkgDir, sourceSet)) addRoot(f);
+
+    const deps = new Set<string>();
+    for (const key of ['dependencies', 'devDependencies', 'peerDependencies']) {
+      if (pkg[key] && typeof pkg[key] === 'object') for (const name of Object.keys(pkg[key] as object)) deps.add(name);
+    }
+    const prefix = pkgDir === '.' ? '' : `${pkgDir}/`;
+    for (const framework of FRAMEWORK_ROOTS) {
+      if (!framework.deps.some((d) => deps.has(d))) continue;
+      const matches = makeMatcher(framework.globs);
+      for (const f of sources) if (f.startsWith(prefix) && matches(f.slice(prefix.length))) addRoot(f);
+    }
+  }
+
+  // A page that loads a script is an entry point for it: <script type="module" src="/src/main.tsx">.
+  for (const html of tracked) {
+    if (!/\.html?$/i.test(html) || html.includes('node_modules/')) continue;
+    const text = readText(root, html);
+    if (!text) continue;
+    const dir = path.posix.dirname(html);
+    for (const match of text.matchAll(HTML_SCRIPT)) {
+      const src = match[1]!;
+      if (/^(?:[a-z]+:)?\/\//i.test(src)) continue;
+      const relative = src.replace(/^\/+/, '');
+      for (const base of src.startsWith('/') ? [dir, '.'] : [dir]) {
+        const candidate = path.posix.normalize(path.posix.join(base, relative));
+        if (sourceSet.has(candidate)) addRoot(candidate);
+      }
+    }
   }
 
   const isUser = makeMatcher(userGlobs);

@@ -287,3 +287,36 @@ test('dead-files: tool files loaded by convention are never candidates', async (
   });
   assert.deepEqual(ids((await deadFiles.scan(context(root))).items), ['dead-file:src/forgotten.ts']);
 });
+
+test('framework apps have entry points even though package.json names none', async () => {
+  const next = makeRepo({
+    'package.json': JSON.stringify({ name: 'shop', dependencies: { next: '15.0.0', react: '19.0.0' } }),
+    'app/page.tsx': `import { Cart } from '../components/cart';\nexport default function Page() { return Cart; }\n`,
+    'app/layout.tsx': `export default function Layout() { return null; }\n`,
+    'components/cart.tsx': `export const Cart = 1;\nexport const unusedCartHelper = 2;\n`,
+    'components/old-banner.tsx': `export const OldBanner = 1;\n`,
+    'lib/fixtures/sample.ts': `export const sample = 1;\n`,
+  });
+  assert.deepEqual(ids((await deadFiles.scan(context(next))).items), ['dead-file:components/old-banner.tsx']);
+  assert.deepEqual(ids((await unusedExports.scan(context(next))).items), ['unused-export:components/cart.tsx#unusedCartHelper']);
+
+  const vite = makeRepo({
+    'package.json': JSON.stringify({ name: 'spa', devDependencies: { vite: '6.0.0' } }),
+    'index.html': `<div id="root"></div><script type="module" src="/src/main.tsx"></script>\n`,
+    'src/main.tsx': `import { App } from './App';\nconsole.log(App);\n`,
+    'src/App.tsx': `export const App = 1;\n`,
+    'src/Unused.tsx': `export const Unused = 1;\n`,
+  });
+  assert.deepEqual(ids((await deadFiles.scan(context(vite))).items), ['dead-file:src/Unused.tsx']);
+});
+
+test('an export merged with a namespace of the same name is left alone', async () => {
+  const merged = `export interface Schema { v: 1 }\nexport declare namespace Schema {\n  export type Input = string;\n}\nexport const other = 1;\n`;
+  assert.equal(removeExport(merged, 'f.ts', 'Schema'), null);
+  const root = makeRepo({
+    'package.json': pkg(),
+    'src/index.ts': `import './schema';\n`,
+    'src/schema.ts': merged,
+  });
+  assert.deepEqual(ids((await unusedExports.scan(context(root))).items), ['unused-export:src/schema.ts#other']);
+});

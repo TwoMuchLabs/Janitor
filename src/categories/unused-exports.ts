@@ -79,6 +79,7 @@ export function removeExport(text: string, fileName: string, name: string): { te
   const sf = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true);
   const matches = sf.statements.filter((s) => declaredExports(s).some((e) => e.name === name));
   if (matches.length === 0) return null;
+  if (sf.statements.some((s) => ts.isModuleDeclaration(s) && ts.isIdentifier(s.name) && s.name.text === name)) return null;
   // `export const a = 1, b = 2;` cannot be partially un-exported.
   if (matches.some((s) => ts.isVariableStatement(s) && s.declarationList.declarations.length !== 1)) return null;
 
@@ -153,6 +154,8 @@ export const unusedExports: Category = {
       const seen = new Set<string>();
       for (const exp of mod.exports) {
         if (seen.has(exp.name) || importedNames.has(exp.name) || project.mentions.identifiers.has(exp.name)) continue;
+        // `interface X` merged with `namespace X` must stay exported together.
+        if (mod.namespaces.has(exp.name)) continue;
         seen.add(exp.name);
         items.push({
           id: `unused-export:${file}#${exp.name}`,

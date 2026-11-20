@@ -24,6 +24,8 @@ interface ModuleNode {
    * nothing can only be useful when run directly or loaded for its side effects.
    */
   exportsAnything: boolean;
+  /** Names of top-level namespaces: an export merged with one cannot be un-exported on its own. */
+  namespaces: Set<string>;
 }
 
 export interface ModuleGraph {
@@ -115,7 +117,7 @@ export function buildModuleGraph(root: string, files: string[]): ModuleGraph {
       continue;
     }
     const sf = ts.createSourceFile(abs, text, ts.ScriptTarget.Latest, true);
-    const node: ModuleNode = { file, edges: new Map(), exports: [], exportsAnything: COMMONJS_EXPORT.test(text) };
+    const node: ModuleNode = { file, edges: new Map(), exports: [], exportsAnything: COMMONJS_EXPORT.test(text), namespaces: new Set() };
     modules.set(file, node);
     const dir = path.posix.dirname(file);
 
@@ -134,6 +136,7 @@ export function buildModuleGraph(root: string, files: string[]): ModuleGraph {
 
     for (const stmt of sf.statements) {
       node.exports.push(...declaredExports(stmt));
+      if (ts.isModuleDeclaration(stmt) && ts.isIdentifier(stmt.name)) node.namespaces.add(stmt.name.text);
       if (hasModifier(stmt, ts.SyntaxKind.ExportKeyword) || ts.isExportDeclaration(stmt) || ts.isExportAssignment(stmt)) {
         node.exportsAnything = true;
       }

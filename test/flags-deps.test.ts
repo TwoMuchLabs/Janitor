@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
-import { classifyUpdate, parseNpmOutdated, planUpdates } from '../src/categories/outdated-deps.js';
+import { classifyUpdate, parseNpmOutdated, parsePnpmOutdated, planUpdates } from '../src/categories/outdated-deps.js';
 import { isFullyOn, nameVariants, parseRegistry, removeFlag, staleFlags } from '../src/categories/stale-flags.js';
 import { context, makeRepo, read } from './helpers.js';
 
@@ -99,4 +99,21 @@ test('planUpdates keeps in-range minor/patch updates and notes the rest', () => 
 
   assert.deepEqual(parseNpmOutdated(''), []);
   assert.deepEqual(parseNpmOutdated('npm ERR!'), []);
+});
+
+test('parsePnpmOutdated treats the locked version as current and never targets a major', () => {
+  const out = JSON.stringify({
+    postcss: { latest: '8.5.33', wanted: '8.5.3', isDeprecated: false, dependencyType: 'devDependencies' },
+    '@headlessui/react': { current: '2.2.0', latest: '2.3.1', wanted: '2.2.0' },
+    react: { latest: '20.0.0', wanted: '19.0.0' },
+    clsx: { latest: '2.1.1', wanted: '2.1.1' },
+    broken: { wanted: '1.0.0' },
+  });
+  const { updates, notes } = planUpdates(parsePnpmOutdated(out), [], 10);
+  assert.deepEqual(updates, [
+    { name: '@headlessui/react', from: '2.2.0', to: '2.3.1', kind: 'minor' },
+    { name: 'postcss', from: '8.5.3', to: '8.5.33', kind: 'patch' },
+  ]);
+  assert.match(notes.join('\n'), /`react` 19\.0\.0 -> 20\.0\.0/);
+  assert.deepEqual(parsePnpmOutdated('not json'), []);
 });
