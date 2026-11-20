@@ -114,6 +114,48 @@ async function lastTouchedDaysAgo(ctx: JanitorContext, registry: string, name: s
  *   reported for a human: inlining the guarded code path changes behaviour-
  *   bearing code, which the janitor does not do unattended.
  */
+/** Flag-shaped entries only: skips "$schema", "version": 2 and similar metadata. */
+function flagNames(registry: Registry): string[] {
+  return Object.keys(registry.flags).filter((n) => {
+    const value = registry.flags[n];
+    return /^[A-Za-z0-9]/.test(n) && (typeof value === 'boolean' || isPlainObject(value));
+  });
+}
+
+/** For each flag, the tracked files (other than the registry, lockfiles and prose) that mention it. */
+function findReferences(ctx: JanitorContext, tracked: string[], registryFile: string, names: string[]): Map<string, string[]> {
+  const patterns = new Map(names.map((n) => [n, referencePattern(n)]));
+  const references = new Map<string, string[]>(names.map((n) => [n, []]));
+  for (const file of tracked) {
+    if (file === registryFile || isLockfile(file) || /\.(?:md|map|snap)$/i.test(file)) continue;
+    const text = readText(ctx.root, file);
+    if (!text) continue;
+    for (const [name, pattern] of patterns) if (pattern.test(text)) references.get(name)!.push(file);
+  }
+  return references;
+}
+
+function removalItem(registryFile: string, name: string): CleanupItem {
+  return {
+    id: `stale-flag:${name}`,
+    description: `remove flag \`${name}\` from \`${registryFile}\` (no references in the codebase)`,
+    async apply(c) {
+      const abs = path.join(c.root, registryFile);
+      const next = removeFlag(await fs.readFile(abs, 'utf8'), name);
+      if (next !== null) await fs.writeFile(abs, next);
+    },
+  };
+}
+
+/** What to tell a human about a flag that is fully on, or null when it was touched recently. */
+async function staleNote(ctx: JanitorContext, registryFile: string, name: string, refs: string[]): Promise<string | null> {
+  const days = await lastTouchedDaysAgo(ctx, registryFile, name);
+  if (days === null || days < ctx.config.flags.staleDays) return null;
+  const shown = refs.slice(0, 5).map((r) => `\`${r}\``).join(', ');
+  const more = refs.length > 5 ? ` and ${refs.length - 5} more` : '';
+  return `Flag \`${name}\` has been fully on for ${days} days. Inline it and delete the off-path by hand; it is referenced in ${shown}${more}.`;
+}
+
 export const staleFlags: Category = {
   name: 'stale-flags',
   title: 'Remove stale feature flags',
@@ -130,45 +172,18 @@ export const staleFlags: Category = {
       return { items: [], notes: [`Flag registry \`${registryFile}\` is missing or is not a JSON object; flags were not checked.`] };
     }
 
-    // Only flag-shaped entries: skips "$schema", "version": 2 and similar metadata.
-    const names = Object.keys(registry.flags).filter((n) => {
-      const value = registry.flags[n];
-      return /^[A-Za-z0-9]/.test(n) && (typeof value === 'boolean' || isPlainObject(value));
-    });
-    const patterns = new Map(names.map((n) => [n, referencePattern(n)]));
-    const references = new Map<string, string[]>(names.map((n) => [n, []]));
-    for (const file of tracked) {
-      if (file === registryFile || isLockfile(file) || /\.(?:md|map|snap)$/i.test(file)) continue;
-      const text = readText(ctx.root, file);
-      if (!text) continue;
-      for (const [name, pattern] of patterns) if (pattern.test(text)) references.get(name)!.push(file);
-    }
-
+    const names = flagNames(registry);
+    const references = findReferences(ctx, tracked, registryFile, names);
     const items: CleanupItem[] = [];
     const notes: string[] = [];
     for (const name of names) {
       const refs = references.get(name)!;
       if (refs.length === 0) {
-        items.push({
-          id: `stale-flag:${name}`,
-          description: `remove flag \`${name}\` from \`${registryFile}\` (no references in the codebase)`,
-          async apply(c) {
-            const abs = path.join(c.root, registryFile);
-            const next = removeFlag(await fs.readFile(abs, 'utf8'), name);
-            if (next !== null) await fs.writeFile(abs, next);
-          },
-        });
+        items.push(removalItem(registryFile, name));
         continue;
       }
-      if (!isFullyOn(registry.flags[name])) continue;
-      const days = await lastTouchedDaysAgo(ctx, registryFile, name);
-      if (days !== null && days >= ctx.config.flags.staleDays) {
-        const shown = refs.slice(0, 5).map((r) => `\`${r}\``).join(', ');
-        const more = refs.length > 5 ? ` and ${refs.length - 5} more` : '';
-        notes.push(
-          `Flag \`${name}\` has been fully on for ${days} days. Inline it and delete the off-path by hand; it is referenced in ${shown}${more}.`,
-        );
-      }
+      const note = isFullyOn(registry.flags[name]) ? await staleNote(ctx, registryFile, name, refs) : null;
+      if (note) notes.push(note);
     }
     return { items, notes };
   },
