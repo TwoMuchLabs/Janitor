@@ -123,7 +123,9 @@ async function snapProject(src: string, repo: string, snap: Snap): Promise<void>
   const { unusedExports } = await import(pathToFileURL(path.join(src, 'categories/unused-exports.ts')).href);
   const { staleFlags } = await import(pathToFileURL(path.join(src, 'categories/stale-flags.ts')).href);
   const name = path.basename(repo);
-  const variants: [string, object][] = [['default', {}], ['entry', { entry: ['src/**', 'lib/*.js'] }], ['ignore', { ignore: ['**/*.js', 'src/utils/**'] }]];
+  const variants: [string, object][] = [
+    ['default', {}], ['entry', { entry: ['src/**', 'lib/*.js'] }], ['ignore', { ignore: ['**/*.js', 'src/utils/**'] }], ['patient', { flags: { staleDays: 100000 } }],
+  ];
   for (const [label, overrides] of variants) {
     const ctx = { root: repo, git: new Git(repo), config: { ...structuredClone(DEFAULT_CONFIG), ...overrides }, log: () => {} };
     const project = await analyzeProject(ctx);
@@ -181,6 +183,8 @@ async function snapEdits(src: string, repo: string, snap: Snap): Promise<void> {
       tidyImports(importsOnly.replace(/\n/g, '\r\n'), abs, half),
       tidyImports(importsOnly, abs, new Set()),
       ...others.map((unused) => tidyImports(`${importsOnly}\nconsole.log(${names.filter((n) => !unused.has(n)).join(', ')});\n`, abs, new Set(names))),
+      // every name dropped on its own, so each kind of binding is seen both kept and dropped beside the others
+      ...names.slice(0, 12).map((dropped) => tidyImports(`${importsOnly}\nconsole.log(${names.filter((n) => n !== dropped).join(', ')});\n`, abs, new Set(names))),
     ];
     snap[`edits/${name}/${file}`] = digest([removals, tidied]);
   }
@@ -228,7 +232,7 @@ const SHAPES: Record<string, string> = {
   // One unused export for each thing isPure() and isDeletable() tell apart.
   'src/purity.ts': [
     'export const nothing = null;', 'export const yes = true;', 'export const re = /x/;', 'export const big = 10n;', 'export const neg = -1;',
-    'export const plus = +compute();', 'export const tpl = `t`;', 'export const arr = [1, [2]];', 'export const spread = [1, ...[2]];',
+    'export const sameLineA = 1; export const sameLineB = 2;', 'export const plus = +1;', 'export const not = !0;', 'export const minusCall = -compute();', 'export const tpl = `t`;', 'export const arr = [1, [2]];', 'export const spread = [1, ...[2]];',
     'export const obj = { m() {}, a: { b: 1 } };', 'export const computedKey = { [compute()]: 1 };', 'export const shorthand = { compute };',
     'export const paren = (1 as number);', 'export const sat = ({ a: 1 } satisfies object);', 'export const call = compute();',
     'export class WithStaticBlock { static { compute(); } }', 'export class Computed extends mixin(Object) {}', 'export class Qualified extends ns.Base {}',
@@ -275,6 +279,11 @@ const SHAPES: Record<string, string> = {
   'source/deep.ts': 'export const fromUnknownLayout = 1;\n',
   'src/orphan.ts': "import { chained } from './orphan-dep';\nexport const orphan = chained;\n",
   'src/orphan-dep.ts': 'export const chained = 1;\n',
+  // root is imported by b and c, b by a: deleting root takes all four, found in the order root, b, c, a.
+  'src/dead-root.ts': 'export const root = 1;\n',
+  'src/dead-b.ts': "import { root } from './dead-root';\nexport const b = root;\n",
+  'src/dead-c.ts': "import { root } from './dead-root';\nexport const c = root;\n",
+  'src/dead-a.ts': "import { b } from './dead-b';\nexport const a = b;\n",
   'src/script-like.ts': 'console.log("run by hand");\n',
   'src/platform.ts': 'export const p = 1;\n',
   'src/platform-browser.ts': 'export const p = 2;\n',
@@ -512,7 +521,8 @@ async function snapEngine(src: string, work: string, snap: Snap): Promise<void> 
 
 const PROJECT: Record<string, string> = {
   'package.json': JSON.stringify({ name: 'fixture', version: '1.0.0', type: 'module', main: 'src/index.js', scripts: { test: 'node check.mjs' } }, null, 2) + '\n',
-  'check.mjs': "import { run } from './src/index.js';\nif (run() !== 3) process.exit(1);\n",
+  // The checks pass without most of the dead code, but not without src/dead.js: one bad item in a group.
+  'check.mjs': "import fs from 'node:fs';\nimport { run } from './src/index.js';\nif (run() !== 3 || !fs.existsSync('src/dead.js')) process.exit(1);\n",
   'src/index.js': "import { add } from './math.js';\nexport function run() {\n  return add(1, 2);\n}\n",
   'src/math.js': "import { helper } from './helper.js';\nexport const add = (a, b) => helper(a) + b;\nexport const unusedThing = 42;\nexport function alsoUnused() {\n  return helper(1);\n}\n",
   'src/helper.js': 'export const helper = (x) => x;\n',
