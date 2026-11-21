@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { selectCategories } from './categories/index.js';
-import { ALL_CATEGORIES, ConfigError, loadConfig, type JanitorConfig } from './config.js';
+import { ALL_CATEGORIES, ConfigError, loadConfig, parseCategoryList, type JanitorConfig } from './config.js';
 import { JanitorError, runJanitor } from './engine.js';
 import { Git } from './git.js';
 import { computeTotals, formatBytes, prTitle, renderPlan, renderPrBody } from './report.js';
@@ -78,7 +78,13 @@ type Flags = ReturnType<typeof readArgs>['values'];
 
 /** Flags given on the command line override what `.janitor.json` says. */
 function applyFlags(config: JanitorConfig, values: Flags): void {
-  if (values.categories) config.categories = values.categories.split(',').map((s) => s.trim()).filter(Boolean);
+  if (values.categories !== undefined) {
+    try {
+      config.categories = parseCategoryList(values.categories);
+    } catch (err) {
+      fail((err as Error).message, 1); // a mistyped argument, like the other flags
+    }
+  }
   if (values['no-bisect']) config.bisect = false;
   if (values['delete-files']) config.deadFiles = 'apply';
   for (const [flag, key] of [['max-verify-runs', 'maxVerifyRuns'], ['timeout-sec', 'verifyTimeoutSec']] as const) {

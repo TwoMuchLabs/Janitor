@@ -225,7 +225,9 @@ janitor run  [options]   Create nightly-janitor/YYYY-MM-DD and apply verified cl
 janitor scan [options]   Dry run: list what would be attempted, change nothing
 
   --repo <path>            Repository to clean (default: current directory)
-  --categories <list>      Comma-separated subset of the categories
+  --categories <list>      Comma-separated subset of the categories. Case, spaces and
+                           underscores are forgiven; an unknown name stops the run
+                           with a one-line error and the nearest known name
   --verify <command>       Verification command; repeat for several
   --date <YYYY-MM-DD>      Date used in the branch name (default: today, UTC)
   --no-bisect              Revert a whole category on failure

@@ -83,6 +83,23 @@ function positive(value: unknown, key: string): number {
   return value;
 }
 
+/**
+ * A `--categories` value as someone typed it. Forgiving about case, spaces and
+ * underscores (`Dead_Files` is `dead-files`); strict about names, because a
+ * misspelt category silently skipped would look like a clean run.
+ */
+export function parseCategoryList(raw: string): string[] {
+  const known: readonly string[] = ALL_CATEGORIES;
+  const names = raw.split(',').map((s) => s.trim().toLowerCase().replace(/[\s_]+/g, '-')).filter(Boolean);
+  if (names.length === 0) throw new ConfigError(`--categories names no category (known: ${known.join(', ')})`);
+  for (const name of names) {
+    if (known.includes(name)) continue;
+    const near = known.find((k) => k.startsWith(name.slice(0, 4)) || k.replace(/-/g, '') === name.replace(/-/g, ''));
+    throw new ConfigError(`unknown category "${name}"${near ? `; did you mean "${near}"?` : ''} (known: ${known.join(', ')})`);
+  }
+  return [...new Set(names)];
+}
+
 /** Merge a parsed config object over the defaults, validating as it goes. */
 export function resolveConfig(raw: Record<string, unknown>): JanitorConfig {
   const cfg: JanitorConfig = structuredClone(DEFAULT_CONFIG);
